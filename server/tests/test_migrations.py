@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS ix_system_logs_ts ON system_logs(ts DESC, id DESC);
 """
 
 RIDES_COLUMNS = {"ride_id", "pm1", "pm2_5", "pm4", "pm10",
-                 "nc0_5", "nc1", "nc2_5", "nc4", "nc10", "ps"}
+                 "nc0_5", "nc1", "nc2_5", "nc4", "nc10"}
 RIDES_SCHEMA_MARKER = "CREATE TABLE IF NOT EXISTS rides"
 
 
