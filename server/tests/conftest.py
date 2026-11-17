@@ -37,6 +37,8 @@ os.environ.update(
         "RETENTION_DAYS": "90",
         "OFFLINE_AFTER_SEC": "90",
         "PUBLIC_BASE_URL": "http://testserver",
+        # Never touch a developer's real /var/lib/wsb/mosquitto_passwd.
+        "MOSQUITTO_PASSWD_FILE": str(_TMP_ROOT / "mosquitto_passwd"),
     }
 )
 
