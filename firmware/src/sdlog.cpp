@@ -24,7 +24,6 @@ constexpr size_t LINE_MAX = 240;
 constexpr size_t BUFFER_MAX = SDLOG_FLUSH_SAMPLES * LINE_MAX;
 
 SemaphoreHandle_t s_mutex = nullptr;
-bool s_ready = false;
 bool s_active = false;
 char s_path[48] = "";
 char s_buf[BUFFER_MAX];
@@ -62,7 +61,6 @@ bool mountSdLocked() {
     SPI.begin(PIN_TOUCH_CLK, PIN_TOUCH_MISO, PIN_TOUCH_MOSI, PIN_TOUCH_CS);
     return false;
   }
-  s_ready = true;
   return true;
 }
 
