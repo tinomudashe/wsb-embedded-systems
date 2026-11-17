@@ -8,6 +8,9 @@
 # Old backups are pruned after RETENTION_DAYS (default 7).
 set -euo pipefail
 
+# Backups and their directory must not be readable by other users.
+umask 077
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB_PATH="${DB_PATH:-${WSB_DB_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)/data/telemetry.db}}"
 BACKUP_DIR="${BACKUP_DIR:-$(dirname "$DB_PATH")/backups}"
@@ -24,6 +27,7 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 fi
 
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$BACKUP_DIR/wsb-telemetry-$STAMP.db"
@@ -31,16 +35,31 @@ OUT="$BACKUP_DIR/wsb-telemetry-$STAMP.db"
 if [ -e "$OUT" ]; then
   OUT="$BACKUP_DIR/wsb-telemetry-$STAMP-$$.db"
 fi
+PARTIAL="$OUT.partial"
+
+cleanup() {
+  if [ -n "${PARTIAL:-}" ] && [ -e "$PARTIAL" ]; then
+    rm -f "$PARTIAL"
+  fi
+}
+trap cleanup EXIT
 
 # Online, consistent copy (does not block writers and flushes the WAL).
-sqlite3 "$DB_PATH" ".backup '$OUT'"
+# The incomplete copy never carries the final .db name.
+sqlite3 "$DB_PATH" ".backup '$PARTIAL'"
 
-CHECK="$(sqlite3 "$OUT" 'PRAGMA quick_check;')"
+CHECK="$(sqlite3 "$PARTIAL" 'PRAGMA quick_check;')"
 if [ "$CHECK" != "ok" ]; then
   echo "backup: integrity check failed for $OUT: $CHECK" >&2
-  rm -f "$OUT"
+  rm -f "$PARTIAL"
+  PARTIAL=""
   exit 1
 fi
+
+chmod 600 "$PARTIAL"
+mv "$PARTIAL" "$OUT"
+PARTIAL=""
+chmod 600 "$OUT"
 
 SIZE="$(wc -c <"$OUT" | tr -d ' ')"
 echo "backup: wrote $OUT (${SIZE} bytes)"
