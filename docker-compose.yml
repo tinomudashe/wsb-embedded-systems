@@ -1,0 +1,60 @@
+# Local development stack: FastAPI + Mosquitto.
+#   cp .env.example .env   # then edit JWT_SECRET / MQTT_PASS
+#   make dev-up            # docker compose up --build -d
+#
+# The build uses the repository root as context so the multi-stage Dockerfile
+# can compile web/ and copy the result into the API image (no stale committed
+# static assets are used). Host ports bind to loopback by default; see
+# docker-compose.lan.yml and the README for firmware LAN testing.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Container paths win over whatever .env says for host-local runs.
+      DB_PATH: /var/lib/wsb/telemetry.db
+      STATIC_DIR: /app/static
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    ports:
+      - "${API_BIND:-127.0.0.1}:8000:8000"
+    volumes:
+      - wsb-data:/var/lib/wsb
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./server/deploy/mosquitto-local.conf:/mosquitto/config/mosquitto.conf:ro
+      - wsb-mosquitto-data:/mosquitto/data
+      - wsb-mosquitto-log:/mosquitto/log
+    ports:
+      - "${MQTT_BIND:-127.0.0.1}:1883:1883"
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -p 1883 -t health/probe -m ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  wsb-data:
+  wsb-mosquitto-data:
+  wsb-mosquitto-log:

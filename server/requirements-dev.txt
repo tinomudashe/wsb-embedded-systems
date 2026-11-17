@@ -1,0 +1,6 @@
+# Development / CI-only dependencies. Runtime deps live in requirements.txt.
+# Install both:  pip install -r requirements.txt -r requirements-dev.txt
+pytest==8.4.2
+pytest-cov==6.2.1
+httpx==0.28.1
+anyio==4.16.0
