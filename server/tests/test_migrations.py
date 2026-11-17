@@ -171,9 +171,16 @@ def test_rides_schema_is_added_to_legacy_db(legacy_db):
     if RIDES_SCHEMA_MARKER not in db.SCHEMA:
         pytest.skip("ride-recorder schema is not on this branch; runs after feat/ride-recorder merges")
 
-    assert db.one(
-        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='rides'"
-    )["n"] == 0
+    # Query the raw file: db.one()/db.query() would call db.init() lazily and
+    # create the rides table before we get to assert that it is absent.
+    conn = sqlite3.connect(config.DB_PATH)
+    try:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='rides'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert before == 0
 
     db.init()
 
