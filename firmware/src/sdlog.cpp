@@ -23,8 +23,8 @@ constexpr const char* CSV_HEADER =
     "ts,lat,lon,alt,speed_kmh,sats,hdop,temp_c,humidity,pressure_hpa,"
     "pm1,pm2_5,pm4,pm10,nc0_5,nc1,nc2_5,nc4,nc10,aqi,gas_kohm,eco2_ppm,tvoc_ppb";
 
-constexpr size_t LINE_MAX = 280;
-constexpr size_t BUFFER_MAX = SDLOG_FLUSH_SAMPLES * LINE_MAX;
+constexpr size_t SDLOG_LINE_MAX = 280;
+constexpr size_t BUFFER_MAX = SDLOG_FLUSH_SAMPLES * SDLOG_LINE_MAX;
 
 SemaphoreHandle_t s_mutex = nullptr;
 std::atomic<bool> s_active{false};
@@ -415,7 +415,7 @@ size_t sdlogProblemCount() {
 void sdlogWriteSample(const TelemetrySample& sample) {
   if (!s_active.load()) return;
 
-  char line[LINE_MAX];
+  char line[SDLOG_LINE_MAX];
   if (!formatRow(sample, line, sizeof(line))) {
     return;  // no valid UTC timestamp -> server would reject the row
   }
