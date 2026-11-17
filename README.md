@@ -84,7 +84,7 @@ PM/environment statistics) and these endpoints are available:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/devices/{device_id}/rides` | Device upload of `text/csv` (or multipart `file`), authenticated by `X-Device-Id`/`X-Device-Key`; device id must match the URL; 5 MB / 50,000 rows |
+| `POST` | `/api/devices/{device_id}/rides` | Device upload of `text/csv` (or multipart `file`), authenticated by `X-Device-Id`/`X-Device-Key`; device id must match the URL; 5 MB / 20,000 rows (firmware uploads are capped at 2 MiB) |
 | `GET` | `/api/devices/{device_id}/rides` | Ride summaries for a device |
 | `GET` | `/api/rides/{ride_id}` | Ride detail, track and stats |
 | `GET` | `/api/rides/{ride_id}/export.csv` | Full ride sample export |
@@ -94,7 +94,8 @@ On the ESP32, insert a microSD card and use **Start REC / Stop REC** on the
 System tab. Samples are buffered and appended to `/ride_YYYYMMDD_HHMMSS.csv`;
 completed files upload at most once per minute while Wi-Fi is available and are
 renamed `.done` after a successful upload. Recording requires a valid UTC clock
-(NTP); PM columns stay empty until a particulate-matter sensor driver is added.
+(NTP or GPS UTC); PM columns stay empty until a particulate-matter sensor driver
+is added.
 
 ## Tests
 
