@@ -76,11 +76,11 @@ and the generated password file. Set `MQTT_USER`/`MQTT_PASS` in `.env` to match
 the password file; the production password/ACL model remains in
 `server/deploy/mosquitto-wsb.conf`.
 
-## Ride recorder (after merging `feat/ride-recorder`)
+## Ride recorder
 
-The ride recorder is developed on its own branch. Once merged, the dashboard
-shows a **Rides & Recorded Tracks** panel (track preview, distance/duration and
-PM/environment statistics) and these endpoints are available:
+The dashboard includes a **Rides & Recorded Tracks** panel (track preview,
+distance/duration and PM/environment statistics) and these endpoints are
+available:
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -93,9 +93,10 @@ PM/environment statistics) and these endpoints are available:
 On the ESP32, insert a microSD card and use **Start REC / Stop REC** on the
 System tab. Samples are buffered and appended to `/ride_YYYYMMDD_HHMMSS.csv`;
 completed files upload at most once per minute while Wi-Fi is available and are
-renamed `.done` after a successful upload. Recording requires a valid UTC clock
-(NTP or GPS UTC); PM columns stay empty until a particulate-matter sensor driver
-is added.
+renamed `.done` after a successful upload. Files that fail permanently are
+parked as `.csv.bad`; oversized or empty files are parked as `.csv.big`.
+Recording requires a valid UTC clock (NTP or GPS UTC); PM columns stay empty
+until a particulate-matter sensor driver is added.
 
 ## Tests
 
