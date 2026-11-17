@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './Icon';
 import { fmt } from './MetricCards';
 
@@ -37,12 +37,26 @@ function metric(stats, field, aggregate = 'avg', digits = 1) {
   return v === null || v === undefined ? '--' : fmt(v, digits);
 }
 
+function hasPM(stats) {
+  return ['pm2_5', 'pm10'].some((field) =>
+    ['avg', 'max', 'min'].some((agg) => stats?.[field]?.[agg] !== null && stats?.[field]?.[agg] !== undefined)
+  );
+}
+
 /** Lightweight SVG preview of a recorded GPS track (no map tiles / extra deps). */
 function TrackPreview({ track }) {
-  const points = useMemo(
-    () => (track || []).filter((p) => p && p.lat !== null && p.lon !== null),
-    [track]
-  );
+  const points = useMemo(() => {
+    const valid = (track || []).filter((p) => p && p.lat !== null && p.lon !== null);
+    if (valid.length <= 400) return valid;
+    const step = Math.ceil(valid.length / 400);
+    const sampled = valid.filter((_, i) => i % step === 0);
+    if (sampled[sampled.length - 1] !== valid[valid.length - 1]) {
+      sampled.push(valid[valid.length - 1]);
+    }
+    return sampled;
+  }, [track]);
+
+  const fullCount = (track || []).filter((p) => p && p.lat !== null && p.lon !== null).length;
 
   if (points.length === 0) {
     return (
@@ -56,24 +70,24 @@ function TrackPreview({ track }) {
   const W = 320;
   const H = 180;
   const PAD = 18;
-  const lats = points.map((p) => p.lat);
-  const lons = points.map((p) => p.lon);
-  let minLat = Math.min(...lats);
-  let maxLat = Math.max(...lats);
-  let minLon = Math.min(...lons);
-  let maxLon = Math.max(...lons);
-  if (maxLat - minLat < 1e-5) {
-    minLat -= 0.00005;
-    maxLat += 0.00005;
-  }
-  if (maxLon - minLon < 1e-5) {
-    minLon -= 0.00005;
-    maxLon += 0.00005;
-  }
+  const midLat = (Math.min(...points.map((p) => p.lat)) + Math.max(...points.map((p) => p.lat))) / 2;
+  const lonScale = Math.cos((midLat * Math.PI) / 180) || 1e-6;
+  const xs = points.map((p) => p.lon * lonScale);
+  const ys = points.map((p) => p.lat);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1e-7);
+  const spanY = Math.max(maxY - minY, 1e-7);
+  // Use one scale for both axes so the track keeps its real shape.
+  const scale = Math.min((W - PAD * 2) / spanX, (H - PAD * 2) / spanY);
+  const offsetX = (W - spanX * scale) / 2;
+  const offsetY = (H - spanY * scale) / 2;
 
-  const project = (p) => {
-    const x = PAD + ((p.lon - minLon) / (maxLon - minLon)) * (W - PAD * 2);
-    const y = H - PAD - ((p.lat - minLat) / (maxLat - minLat)) * (H - PAD * 2);
+  const project = (p, index) => {
+    const x = offsetX + (xs[index] - minX) * scale;
+    const y = H - offsetY - (ys[index] - minY) * scale;
     return [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
   };
 
@@ -87,7 +101,7 @@ function TrackPreview({ track }) {
       className="ride-track"
       viewBox={`0 0 ${W} ${H}`}
       role="img"
-      aria-label={`Recorded track with ${points.length} GPS fixes`}
+      aria-label={`Recorded track with ${fullCount} GPS fixes`}
     >
       <rect x="0" y="0" width={W} height={H} rx="10" className="ride-track-bg" />
       {[0.25, 0.5, 0.75].map((f) => (
@@ -109,12 +123,17 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [detailNonce, setDetailNonce] = useState(0);
   const [error, setError] = useState('');
+  const loadSeqRef = useRef(0);
 
   const loadRides = useCallback(
     async (preferredId) => {
       if (!deviceId) return [];
+      const requestId = ++loadSeqRef.current;
       const rows = await api(`/api/devices/${encodeURIComponent(deviceId)}/rides?limit=50`);
+      if (requestId !== loadSeqRef.current) return [];
       const list = Array.isArray(rows) ? rows : [];
       setRides(list);
       setSelectedId((prev) => {
@@ -128,10 +147,12 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
 
   useEffect(() => {
     let cancelled = false;
+    loadSeqRef.current += 1;
     setLoading(true);
     setError('');
     setRides([]);
     setDetail(null);
+    setDetailError('');
     setSelectedId(null);
     loadRides()
       .catch((e) => {
@@ -149,15 +170,20 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
     let cancelled = false;
     if (!selectedId) {
       setDetail(null);
+      setDetailError('');
       return undefined;
     }
     setDetailLoading(true);
+    setDetailError('');
+    setDetail(null);
     api(`/api/rides/${encodeURIComponent(selectedId)}`)
       .then((data) => {
         if (!cancelled) setDetail(data);
       })
       .catch((e) => {
-        if (!cancelled && e.message !== 'unauthorized') setError(e.message);
+        if (!cancelled && e.message !== 'unauthorized') {
+          setDetailError(e.message);
+        }
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
@@ -165,7 +191,7 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
     return () => {
       cancelled = true;
     };
-  }, [api, selectedId]);
+  }, [api, selectedId, detailNonce]);
 
   async function handleRefresh() {
     setError('');
@@ -253,12 +279,14 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
                       <small>Samples</small>
                       <strong>{ride.sample_count ?? '--'}</strong>
                     </span>
-                    <span>
-                      <small>PM2.5 avg / max</small>
-                      <strong>
-                        {metric(ride.stats, 'pm2_5', 'avg')} / {metric(ride.stats, 'pm2_5', 'max')}
-                      </strong>
-                    </span>
+                    {hasPM(ride.stats) && (
+                      <span>
+                        <small>PM2.5 avg / max</small>
+                        <strong>
+                          {metric(ride.stats, 'pm2_5', 'avg')} / {metric(ride.stats, 'pm2_5', 'max')}
+                        </strong>
+                      </span>
+                    )}
                   </div>
                 </button>
               );
@@ -266,9 +294,23 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
           </div>
 
           <div className="ride-detail">
-            {detailLoading || !detail ? (
+            {detailLoading ? (
               <div className="rides-empty muted">
                 <span className="spinner-dot" /> Loading ride track…
+              </div>
+            ) : detailError ? (
+              <div className="rides-empty">
+                <Icon name="triangle-warning" />
+                <strong>Could not load this ride</strong>
+                <p className="muted small">{detailError}</p>
+                <button type="button" className="btn" onClick={() => setDetailNonce((n) => n + 1)}>
+                  <Icon name="rotate-right" /> Retry
+                </button>
+              </div>
+            ) : !detail ? (
+              <div className="rides-empty muted">
+                <Icon name="map-marker-track" />
+                <span>Select a ride to see its track and statistics.</span>
               </div>
             ) : (
               <>
@@ -306,20 +348,24 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
                       {detail.sample_count ?? '--'} / {stats.fixes ?? '--'}
                     </strong>
                   </div>
-                  <div>
-                    <span className="muted small">PM2.5 avg</span>
-                    <strong>{metric(stats, 'pm2_5', 'avg')} µg/m³</strong>
-                  </div>
-                  <div>
-                    <span className="muted small">PM2.5 max</span>
-                    <strong>{metric(stats, 'pm2_5', 'max')} µg/m³</strong>
-                  </div>
-                  <div>
-                    <span className="muted small">PM10 avg / max</span>
-                    <strong>
-                      {metric(stats, 'pm10', 'avg')} / {metric(stats, 'pm10', 'max')} µg/m³
-                    </strong>
-                  </div>
+                  {hasPM(stats) && (
+                    <>
+                      <div>
+                        <span className="muted small">PM2.5 avg</span>
+                        <strong>{metric(stats, 'pm2_5', 'avg')} µg/m³</strong>
+                      </div>
+                      <div>
+                        <span className="muted small">PM2.5 max</span>
+                        <strong>{metric(stats, 'pm2_5', 'max')} µg/m³</strong>
+                      </div>
+                      <div>
+                        <span className="muted small">PM10 avg / max</span>
+                        <strong>
+                          {metric(stats, 'pm10', 'avg')} / {metric(stats, 'pm10', 'max')} µg/m³
+                        </strong>
+                      </div>
+                    </>
+                  )}
                   <div>
                     <span className="muted small">Temp avg</span>
                     <strong>{metric(stats, 'temp_c', 'avg')} °C</strong>
@@ -338,10 +384,17 @@ export default function RidesPanel({ deviceId, api, onNotify }) {
                   </div>
                 </div>
 
+                {!hasPM(stats) && (
+                  <p className="muted small ride-pm-empty">
+                    No particulate-matter data was recorded for this ride. PM fields appear once an
+                    SPS30-class sensor is fitted and its columns are filled on the SD card.
+                  </p>
+                )}
+
                 <p className="muted small ride-detail-foot">
                   <Icon name="clock" /> Uploaded {formatDate(detail.uploaded_at)} ·{' '}
                   {detail.track?.length || 0} track points
-                  {detail.config?.version ? ` · config v${detail.config.version}` : ''}
+                  {detail.config?.version ? ` · current device config v${detail.config.version}` : ''}
                 </p>
               </>
             )}

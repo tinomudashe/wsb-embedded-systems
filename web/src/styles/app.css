@@ -1821,7 +1821,7 @@ table.data tbody tr:hover {
 }
 .ride-item-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
   gap: 8px;
 }
 .ride-item-metrics span,
@@ -1929,11 +1929,18 @@ table.data tbody tr:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ride-detail-foot {
+.ride-detail-foot,
+.ride-pm-empty {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+.ride-pm-empty {
+  display: block;
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 
 .rides-empty {
@@ -1983,7 +1990,7 @@ table.data tbody tr:hover {
     max-height: none;
   }
   .ride-detail-head .btn,
-  .panel-head .btn {
+  .rides-panel .panel-head .btn {
     flex: 1;
   }
 }
