@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import secrets
 from contextlib import asynccontextmanager, suppress
@@ -46,10 +47,13 @@ MAX_INGEST_BYTES = 256 * 1024
 MAX_BATCH = 200
 
 MAX_RIDE_BYTES = 5 * 1024 * 1024
-MAX_RIDE_ROWS = 50_000
+MAX_RIDE_ROWS = 20_000
+# Stable device CSV contract. Fields added after the original header are appended
+# so existing parsers can still read the first 20 columns.
 RIDE_CSV_COLUMNS = [
     "ts", "lat", "lon", "alt", "speed_kmh", "sats", "hdop", "temp_c", "humidity", "pressure_hpa",
     "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10", "aqi",
+    "gas_kohm", "eco2_ppm", "tvoc_ppb",
 ]
 
 
@@ -76,12 +80,15 @@ def _ride_num(row: dict, field: str) -> float | None:
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         raise _RideRowError(f"{field}: not a number")
+    if not math.isfinite(value):
+        raise _RideRowError(f"{field}: not a finite number")
+    return value
 
 
-def _ride_row_message(row: dict, device_id: str) -> dict:
+def _ride_row_message(row: dict, device_id: str) -> tuple[dict, list[str]]:
     ts = _ride_ts(row.get("ts"))
     lat = _ride_num(row, "lat")
     lon = _ride_num(row, "lon")
@@ -90,9 +97,12 @@ def _ride_row_message(row: dict, device_id: str) -> dict:
     env = {}
     for key in ("temp_c", "humidity", "pressure_hpa", "aqi",
                 "pm1", "pm2_5", "pm4", "pm10",
-                "nc0_5", "nc1", "nc2_5", "nc4", "nc10"):
+                "nc0_5", "nc1", "nc2_5", "nc4", "nc10",
+                "gas_kohm", "eco2_ppm", "tvoc_ppb"):
         env[key] = _ride_num(row, key)
     sats = _ride_num(row, "sats")
+    if sats is not None and (sats < 0 or sats > 100):
+        raise _RideRowError(f"sats: {sats} out of range [0, 100]")
 
     msg = {
         "device_id": device_id,
@@ -117,11 +127,11 @@ def _ride_row_message(row: dict, device_id: str) -> dict:
     ts_warnings = [w for w in warnings if w.startswith("ts:")]
     if ts_warnings:
         raise _RideRowError("; ".join(ts_warnings))
-    return rec
+    return rec, warnings
 
 
-def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict], int]:
-    """Return (accepted records, first row errors, total rejected). Raises for bad header/size."""
+def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict], int, int]:
+    """Return (accepted records, first row errors, total rejected, warning count)."""
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -139,16 +149,20 @@ def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict],
     accepted: list[dict] = []
     errors: list[dict] = []
     rejected = 0
+    warnings_total = 0
     for index, row in enumerate(reader, start=1):
         if index > MAX_RIDE_ROWS:
             raise HTTPException(413, f"ride larger than {MAX_RIDE_ROWS} rows")
         try:
-            accepted.append(_ride_row_message(row, device_id))
+            rec, warnings = _ride_row_message(row, device_id)
         except _RideRowError as e:
             rejected += 1
             if len(errors) < 10:
                 errors.append({"row": index, "error": str(e)})
-    return accepted, errors, rejected
+            continue
+        accepted.append(rec)
+        warnings_total += len(warnings)
+    return accepted, errors, rejected, warnings_total
 
 
 def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
@@ -159,27 +173,34 @@ def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
             "ok": True,
             "ride_id": existing["id"],
             "inserted": 0,
-            "rejected": 0,
+            "rejected": existing.get("rejected_count") or 0,
+            "warnings": 0,
             "samples": existing["sample_count"],
             "duration_s": existing["duration_s"],
             "distance_m": existing["distance_m"],
             "duplicate": True,
         }
 
-    accepted, errors, rejected = _parse_ride_csv(raw, device_id)
+    accepted, errors, rejected, warnings_total = _parse_ride_csv(raw, device_id)
     if not accepted:
         store.add_log("device", "ride_rejected",
                       f"Ride upload {filename} had no valid rows ({rejected} errors)", level="WARN",
                       device_id=device_id)
         raise HTTPException(400, {"message": "no valid rows in CSV", "rejected": rejected, "errors": errors})
 
-    duplicate, ride = store.save_ride(device_id, filename, sha256, accepted)
+    if warnings_total:
+        store.add_log("device", "ride_partial",
+                      f"Ride {filename}: {warnings_total} out-of-range value(s) nulled", level="WARN",
+                      device_id=device_id)
+
+    duplicate, ride = store.save_ride(device_id, filename, sha256, accepted, rejected)
     if duplicate:
         return {
             "ok": True,
             "ride_id": ride["id"],
             "inserted": 0,
-            "rejected": rejected,
+            "rejected": ride.get("rejected_count") or 0,
+            "warnings": warnings_total,
             "samples": ride["sample_count"],
             "duration_s": ride["duration_s"],
             "distance_m": ride["distance_m"],
@@ -190,6 +211,7 @@ def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
         "ride_id": ride["id"],
         "inserted": len(accepted),
         "rejected": rejected,
+        "warnings": warnings_total,
         "samples": ride["sample_count"],
         "duration_s": ride["duration_s"],
         "distance_m": ride["distance_m"],
@@ -469,15 +491,31 @@ async def upload_ride(device_id: str, request: Request, auth_device: str = Depen
 
     content_type = (request.headers.get("content-type") or "").lower()
     filename = request.headers.get("x-filename") or ""
+
+    try:
+        declared_size = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared_size = 0
+    if declared_size > MAX_RIDE_BYTES:
+        raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             raise HTTPException(400, "multipart body must include a 'file' field")
-        raw = await upload.read()
+        size = getattr(upload, "size", None)
+        if size is not None and size > MAX_RIDE_BYTES:
+            raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+        raw = await upload.read(MAX_RIDE_BYTES + 1)
         filename = filename or getattr(upload, "filename", "") or ""
     elif "text/csv" in content_type or "application/csv" in content_type:
-        raw = await request.body()
+        chunks = bytearray()
+        async for chunk in request.stream():
+            if len(chunks) + len(chunk) > MAX_RIDE_BYTES:
+                raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+            chunks.extend(chunk)
+        raw = bytes(chunks)
     else:
         raise HTTPException(415, "expected Content-Type text/csv or multipart/form-data")
 
@@ -750,7 +788,7 @@ def delete_logs(user: str = Depends(auth.require_user), device_id: str | None = 
 CSV_COLS = ["ts", "received_at", "seq", "ts_source", "replay", "transport", "ride_id", "gps_fix",
             "lat", "lon", "alt", "speed_kmh", "course", "sats", "hdop", "temp_c", "humidity",
             "pressure_hpa", "gas_kohm", "aqi", "aqi_source", "eco2_ppm", "tvoc_ppb",
-            "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10", "ps",
+            "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10",
             "rssi", "heap", "fw"]
 
 

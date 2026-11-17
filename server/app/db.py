@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS rides (
   duration_s   REAL,
   distance_m   REAL,
   sample_count INTEGER NOT NULL DEFAULT 0,
+  rejected_count INTEGER NOT NULL DEFAULT 0,
   stats_json   TEXT,
   uploaded_at  TEXT NOT NULL,
   UNIQUE(device_id, sha256)
@@ -85,7 +86,7 @@ CREATE TABLE IF NOT EXISTS telemetry (
   temp_c REAL, humidity REAL, pressure_hpa REAL, gas_kohm REAL,
   aqi REAL, aqi_source TEXT, eco2_ppm REAL, tvoc_ppb REAL,
   pm1 REAL, pm2_5 REAL, pm4 REAL, pm10 REAL,
-  nc0_5 REAL, nc1 REAL, nc2_5 REAL, nc4 REAL, nc10 REAL, ps REAL,
+  nc0_5 REAL, nc1 REAL, nc2_5 REAL, nc4 REAL, nc10 REAL,
   rssi INTEGER, heap INTEGER, buffered INTEGER, fw TEXT, cfg_version INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_telemetry_dedupe ON telemetry(device_id, ts, seq);
@@ -129,11 +130,24 @@ MIGRATIONS = [
     ("telemetry", "nc2_5", "ALTER TABLE telemetry ADD COLUMN nc2_5 REAL"),
     ("telemetry", "nc4", "ALTER TABLE telemetry ADD COLUMN nc4 REAL"),
     ("telemetry", "nc10", "ALTER TABLE telemetry ADD COLUMN nc10 REAL"),
-    ("telemetry", "ps", "ALTER TABLE telemetry ADD COLUMN ps REAL"),
+    ("rides", "rejected_count", "ALTER TABLE rides ADD COLUMN rejected_count INTEGER NOT NULL DEFAULT 0"),
 ]
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
+
+
+def apply_schema(conn: sqlite3.Connection) -> None:
+    """Create/migrate the schema on an arbitrary connection (also used by tests)."""
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    for table, col, sql in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in cols:
+            conn.execute(sql)
+    # Created after migrations so it also works on databases that predate ride_id.
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_telemetry_ride_id ON telemetry(ride_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_telemetry_ride_ts ON telemetry(ride_id, ts)")
 
 
 def init() -> None:
@@ -144,14 +158,7 @@ def init() -> None:
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")
     _conn.execute("PRAGMA foreign_keys=ON")
-    _conn.executescript(SCHEMA)
-    for table, col, sql in MIGRATIONS:
-        cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if col not in cols:
-            _conn.execute(sql)
-    # Created after migrations so it also works on databases that predate ride_id.
-    _conn.execute("CREATE INDEX IF NOT EXISTS ix_telemetry_ride_id ON telemetry(ride_id)")
-    _conn.execute("CREATE INDEX IF NOT EXISTS ix_telemetry_ride_ts ON telemetry(ride_id, ts)")
+    apply_schema(_conn)
 
 
 def _c() -> sqlite3.Connection:

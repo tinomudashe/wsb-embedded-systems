@@ -27,7 +27,7 @@ TELEMETRY_COLS = [
     "device_id", "seq", "ts", "received_at", "ts_source", "uptime_ms", "replay", "transport", "ride_id",
     "gps_fix", "lat", "lon", "alt", "speed_kmh", "course", "sats", "hdop",
     "temp_c", "humidity", "pressure_hpa", "gas_kohm", "aqi", "aqi_source", "eco2_ppm", "tvoc_ppb",
-    "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10", "ps",
+    "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10",
     "rssi", "heap", "buffered", "fw", "cfg_version",
 ]
 _INSERT_TELEMETRY = (
@@ -317,13 +317,35 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
+MAX_RIDE_SPEED_KMH = 150.0
+MAX_RIDE_SEGMENT_M = 5000.0
+
+
+def _parse_ride_ts(ts: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
 def _ride_metrics(records: list[dict]) -> dict:
     """Compute duration, haversine distance and per-metric min/max/avg for a ride."""
     recs = sorted(records, key=lambda r: r["ts"])
     fixes = [r for r in recs if r.get("gps_fix") and r.get("lat") is not None and r.get("lon") is not None]
     distance = 0.0
     for prev, cur in zip(fixes, fixes[1:]):
-        distance += _haversine_m(prev["lat"], prev["lon"], cur["lat"], cur["lon"])
+        segment = _haversine_m(prev["lat"], prev["lon"], cur["lat"], cur["lon"])
+        if segment > MAX_RIDE_SEGMENT_M:
+            continue
+        t0, t1 = _parse_ride_ts(prev["ts"]), _parse_ride_ts(cur["ts"])
+        if t0 is None or t1 is None:
+            continue
+        dt = (t1 - t0).total_seconds()
+        if dt <= 0:
+            continue
+        if (segment / dt) * 3.6 > MAX_RIDE_SPEED_KMH:
+            continue  # GPS jump / teleport, not real movement
+        distance += segment
 
     def agg(field: str) -> dict:
         vals = [float(r[field]) for r in recs if isinstance(r.get(field), (int, float)) and not isinstance(r.get(field), bool)]
@@ -399,7 +421,8 @@ def ride_track(ride_id: str, limit: int = 50000) -> list[dict]:
     )
 
 
-def save_ride(device_id: str, filename: str, sha256: str, records: list[dict]) -> tuple[bool, dict]:
+def save_ride(device_id: str, filename: str, sha256: str, records: list[dict],
+              rejected_count: int = 0) -> tuple[bool, dict]:
     """Persist an uploaded ride idempotently. Returns (duplicate, ride)."""
     existing = find_ride_by_hash(device_id, sha256)
     if existing:
@@ -412,18 +435,20 @@ def save_ride(device_id: str, filename: str, sha256: str, records: list[dict]) -
         with db.transaction() as conn:
             conn.execute(
                 """INSERT INTO rides (id, device_id, filename, sha256, started_at, ended_at, duration_s,
-                                      distance_m, sample_count, stats_json, uploaded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      distance_m, sample_count, rejected_count, stats_json, uploaded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ride_id, device_id, filename[:200], sha256, metrics["started_at"], metrics["ended_at"],
-                 metrics["duration_s"], metrics["distance_m"], len(records),
+                 metrics["duration_s"], metrics["distance_m"], len(records), int(rejected_count),
                  json.dumps(metrics["stats"]), uploaded_at),
             )
+            rows = []
             for rec in records:
                 row = dict(rec)
                 row["ride_id"] = ride_id
                 row["transport"] = "upload"
                 row["replay"] = 1
-                conn.execute(_INSERT_TELEMETRY, row)
+                rows.append(row)
+            conn.executemany(_INSERT_TELEMETRY, rows)
     except sqlite3.IntegrityError:
         # A concurrent upload with the same content won the unique(device_id, sha256) race.
         existing = find_ride_by_hash(device_id, sha256)
@@ -508,12 +533,14 @@ def clear_logs(device_id: str | None = None) -> int:
 
 
 def latest_telemetry(device_id: str) -> dict | None:
-    return db.one("SELECT * FROM telemetry WHERE device_id = ? ORDER BY ts DESC, id DESC LIMIT 1", (device_id,))
+    return db.one("SELECT * FROM telemetry WHERE device_id = ? AND ride_id IS NULL "
+                  "ORDER BY ts DESC, id DESC LIMIT 1", (device_id,))
 
 
 def last_fix(device_id: str) -> dict | None:
     return db.one("SELECT ts, lat, lon, alt, sats, hdop FROM telemetry "
-                  "WHERE device_id = ? AND gps_fix = 1 ORDER BY ts DESC LIMIT 1", (device_id,))
+                  "WHERE device_id = ? AND gps_fix = 1 AND ride_id IS NULL "
+                  "ORDER BY ts DESC LIMIT 1", (device_id,))
 
 
 def query_telemetry(device_id: str, frm: str, to: str, limit: int, newest_first: bool = False) -> list[dict]:
@@ -528,7 +555,8 @@ def series(device_id: str, frm: str, to: str, bucket_sec: int) -> list[dict]:
                   AVG(temp_c) AS temp_c, AVG(humidity) AS humidity, AVG(pressure_hpa) AS pressure_hpa,
                   AVG(aqi) AS aqi, AVG(gas_kohm) AS gas_kohm, AVG(rssi) AS rssi, AVG(alt) AS alt,
                   AVG(eco2_ppm) AS eco2_ppm, AVG(pm2_5) AS pm2_5, AVG(pm10) AS pm10, COUNT(*) AS n
-             FROM telemetry WHERE device_id = :id AND ts >= :frm AND ts <= :to
+             FROM telemetry WHERE device_id = :id AND ride_id IS NULL
+              AND ts >= :frm AND ts <= :to
             GROUP BY t ORDER BY t""",
         {"b": bucket_sec, "id": device_id, "frm": frm, "to": to},
     )
@@ -536,7 +564,8 @@ def series(device_id: str, frm: str, to: str, bucket_sec: int) -> list[dict]:
 
 def track(device_id: str, frm: str, limit: int) -> list[dict]:
     return db.query("SELECT ts, lat, lon, alt, speed_kmh FROM telemetry "
-                    "WHERE device_id = ? AND gps_fix = 1 AND ts >= ? ORDER BY ts LIMIT ?", (device_id, frm, limit))
+                    "WHERE device_id = ? AND gps_fix = 1 AND ride_id IS NULL AND ts >= ? "
+                    "ORDER BY ts LIMIT ?", (device_id, frm, limit))
 
 
 def stats(device_id: str, frm: str) -> dict:
@@ -547,7 +576,7 @@ def stats(device_id: str, frm: str) -> dict:
                   AVG(aqi) AS aqi_avg, MAX(aqi) AS aqi_max, SUM(replay) AS replayed, SUM(gps_fix) AS fixes,
                   MIN(pm2_5) AS pm2_5_min, MAX(pm2_5) AS pm2_5_max, AVG(pm2_5) AS pm2_5_avg,
                   MIN(pm10) AS pm10_min, MAX(pm10) AS pm10_max, AVG(pm10) AS pm10_avg
-             FROM telemetry WHERE device_id = ? AND ts >= ?""",
+             FROM telemetry WHERE device_id = ? AND ride_id IS NULL AND ts >= ?""",
         (device_id, frm),
     ) or {}
 
@@ -557,10 +586,23 @@ def rejected(device_id: str, limit: int) -> list[dict]:
 
 
 def purge_old(days: int) -> int:
-    n = db.execute("DELETE FROM telemetry WHERE ts < ?", (iso_ago(days * 86400),)).rowcount
-    db.execute("DELETE FROM rejected_messages WHERE received_at < ?", (iso_ago(days * 86400),))
+    """Purge expired telemetry and any ride metadata whose data has aged out.
+
+    Ride rows are deleted together with their telemetry so a listed ride never
+    has an empty track or an idempotent re-upload that returns no rows.
+    """
+    cutoff = iso_ago(days * 86400)
+    with db.transaction() as conn:
+        removed = conn.execute("DELETE FROM telemetry WHERE ts < ?", (cutoff,)).rowcount
+        old_rides = [r["id"] for r in conn.execute(
+            "SELECT id FROM rides WHERE ended_at IS NOT NULL AND ended_at < ?", (cutoff,)
+        ).fetchall()]
+        for ride_id in old_rides:
+            conn.execute("DELETE FROM telemetry WHERE ride_id = ?", (ride_id,))
+            conn.execute("DELETE FROM rides WHERE id = ?", (ride_id,))
+    db.execute("DELETE FROM rejected_messages WHERE received_at < ?", (cutoff,))
     db.execute("DELETE FROM pairing_tokens WHERE expires_at < ?", (utcnow_iso(),))
-    return n
+    return removed
 
 
 # ---------------- calibration config ----------------

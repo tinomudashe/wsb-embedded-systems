@@ -109,7 +109,6 @@ def normalize_telemetry(
     nc2_5 = _num(env.get("nc2_5"), 0, 10000, "env.nc2_5", w)
     nc4 = _num(env.get("nc4"), 0, 10000, "env.nc4", w)
     nc10 = _num(env.get("nc10"), 0, 10000, "env.nc10", w)
-    ps = _num(env.get("ps"), 0, 10, "env.ps", w)
 
     # If BME280 is attached (no gas resistor), derive indoor environmental AQI estimate from T + RH
     if derive_aqi and aqi is None and temp_c is not None and humidity is not None:
@@ -174,7 +173,6 @@ def normalize_telemetry(
         "nc2_5": nc2_5,
         "nc4": nc4,
         "nc10": nc10,
-        "ps": ps,
         "rssi": rssi if _is_int(rssi) and -130 < rssi <= 0 else None,
         "heap": sys_["heap"] if _is_int(sys_.get("heap")) else None,
         "buffered": sys_["buffered"] if _is_int(sys_.get("buffered")) else None,
