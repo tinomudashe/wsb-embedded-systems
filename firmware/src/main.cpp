@@ -5,6 +5,7 @@
 #include "net.h"
 #include "portal.h"
 #include "power.h"
+#include "sdlog.h"
 #include "sensors.h"
 #include "settings.h"
 #include "telemetry.h"
@@ -60,6 +61,9 @@ void setup() {
   gpsInit(cfg.gps_baud);
   snprintf(splashBuf, sizeof(splashBuf), "GPS UART2: %u baud", cfg.gps_baud);
   uiSplashStep(true, splashBuf);
+
+  bool sdOk = sdlogInit();
+  uiSplashStep(sdOk, sdOk ? "Storage: microSD ready" : "Storage: no SD card");
 
   telemetryInit();
   netInit();
@@ -151,6 +155,7 @@ void loop() {
                                                   net.wifiConnected, net.rssi,
                                                   ntpOk, ntpEpochMs, canSendLive);
     telemetryBufferPush(sample);
+    sdlogWriteSample(sample);
     Serial.printf("[TLM] Queued seq=%u ts_src=%u replay=%d buf=%u\n",
                   sample.seq, sample.ts_source, sample.replay ? 1 : 0,
                   static_cast<unsigned>(telemetryBufferCount()));
