@@ -16,6 +16,7 @@
 #include "gps.h"
 #include "portal.h"
 #include "power.h"
+#include "sdlog.h"
 #include "settings.h"
 #include "telemetry.h"
 #include "ui.h"
@@ -72,6 +73,7 @@ uint32_t s_lastMqttAttemptMs = 0;
 uint32_t s_mqttBackoffMs = 2000;
 uint32_t s_lastHttpConfigAttemptMs = 0;
 uint32_t s_lastHttpPostAttemptMs = 0;
+uint32_t s_lastRideUploadMs = 0;
 uint32_t s_httpBackoffMs = 2000;
 
 template <typename Fn>
@@ -771,6 +773,19 @@ void netTaskFn(void* param) {
       ensureMqtt(cred);
       flushDeviceLogs();
       flushTelemetry(cred);
+
+      // Upload one finished ride CSV at most once a minute. This runs on the net
+      // task, so the UI loop keeps rendering; live samples stay in the ring
+      // buffer while the HTTP request is in flight.
+      uint32_t now = millis();
+      if (wifiOk && (s_lastRideUploadMs == 0 ||
+                     (now - s_lastRideUploadMs) >= SDLOG_UPLOAD_INTERVAL_MS)) {
+        s_lastRideUploadMs = now;
+        sdlogRefreshPending();
+        if (sdlogPendingCount() > 0) {
+          sdlogUploadPending();
+        }
+      }
     }
 
     // Sync observable NetStatus snapshot for Core 1 UI/telemetry

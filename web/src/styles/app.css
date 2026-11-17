@@ -1754,3 +1754,243 @@ table.data tbody tr:hover {
 .cyd-three-canvas:active {
   cursor: grabbing;
 }
+
+/* =====================================================================
+   Ride recorder: list, track preview and summary stats
+   ===================================================================== */
+.rides-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1020px) {
+  .rides-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ride-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.ride-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 12px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ride-item:hover {
+  background: var(--surface-2);
+}
+.ride-item.active {
+  border-color: var(--blue);
+  background: rgba(0, 102, 255, 0.06);
+}
+.ride-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ride-item-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+.ride-item-file {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ride-item-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 8px;
+}
+.ride-item-metrics span,
+.ride-stats-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.ride-item-metrics small,
+.ride-stats-grid span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ride-item-metrics strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ride-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.ride-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ride-detail-head h3 {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.ride-detail-head p {
+  margin-top: 2px;
+}
+.ride-track {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  display: block;
+}
+.ride-track-bg {
+  fill: var(--surface-2);
+}
+.ride-track-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.ride-track-line {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ride-track-start {
+  fill: var(--surface);
+  stroke: var(--blue);
+  stroke-width: 2.5;
+}
+.ride-track-end {
+  fill: var(--blue);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+}
+.ride-track-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 150px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.ride-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.ride-stats-grid div {
+  background: var(--surface-2);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+.ride-stats-grid strong {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ride-detail-foot,
+.ride-pm-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ride-pm-empty {
+  display: block;
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.rides-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  padding: 26px 18px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.rides-empty i.fi {
+  font-size: 22px;
+  color: var(--blue);
+}
+.rides-empty p {
+  max-width: 440px;
+}
+.spinner-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--blue);
+  display: inline-block;
+  animation: ride-pulse 1s ease-in-out infinite;
+}
+@keyframes ride-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (max-width: 560px) {
+  .ride-item-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ride-list {
+    max-height: none;
+  }
+  .ride-detail-head .btn,
+  .rides-panel .panel-head .btn {
+    flex: 1;
+  }
+}

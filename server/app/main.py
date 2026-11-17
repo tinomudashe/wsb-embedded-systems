@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import logging
+import math
+import os
 import secrets
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
@@ -42,6 +45,178 @@ log = logging.getLogger("wsb.api")
 
 MAX_INGEST_BYTES = 256 * 1024
 MAX_BATCH = 200
+
+MAX_RIDE_BYTES = 5 * 1024 * 1024
+MAX_RIDE_ROWS = 20_000
+# Stable device CSV contract. Fields added after the original header are appended
+# so existing parsers can still read the first 20 columns.
+RIDE_CSV_COLUMNS = [
+    "ts", "lat", "lon", "alt", "speed_kmh", "sats", "hdop", "temp_c", "humidity", "pressure_hpa",
+    "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10", "aqi",
+    "gas_kohm", "eco2_ppm", "tvoc_ppb",
+]
+
+
+class _RideRowError(Exception):
+    pass
+
+
+def _ride_ts(raw: object) -> str:
+    """Parse a CSV timestamp and return canonical UTC ISO-8601, or raise."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not text:
+        raise _RideRowError("ts: missing")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise _RideRowError(f"ts: invalid ISO-8601 {text[:32]!r}")
+    if parsed.tzinfo is None:
+        raise _RideRowError("ts: timezone required (use UTC ...Z)")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _ride_num(row: dict, field: str) -> float | None:
+    raw = row.get(field)
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise _RideRowError(f"{field}: not a number")
+    if not math.isfinite(value):
+        raise _RideRowError(f"{field}: not a finite number")
+    return value
+
+
+def _ride_row_message(row: dict, device_id: str) -> tuple[dict, list[str]]:
+    ts = _ride_ts(row.get("ts"))
+    lat = _ride_num(row, "lat")
+    lon = _ride_num(row, "lon")
+    fix = lat is not None and lon is not None and not (lat == 0 and lon == 0)
+
+    env = {}
+    for key in ("temp_c", "humidity", "pressure_hpa", "aqi",
+                "pm1", "pm2_5", "pm4", "pm10",
+                "nc0_5", "nc1", "nc2_5", "nc4", "nc10",
+                "gas_kohm", "eco2_ppm", "tvoc_ppb"):
+        env[key] = _ride_num(row, key)
+    sats = _ride_num(row, "sats")
+    if sats is not None and (sats < 0 or sats > 100):
+        raise _RideRowError(f"sats: {sats} out of range [0, 100]")
+
+    msg = {
+        "device_id": device_id,
+        "ts": ts,
+        "ts_source": "sdcard",
+        "replay": True,
+        "gps": {
+            "fix": fix,
+            "lat": lat,
+            "lon": lon,
+            "alt": _ride_num(row, "alt"),
+            "speed_kmh": _ride_num(row, "speed_kmh"),
+            "sats": None if sats is None else int(round(sats)),
+            "hdop": _ride_num(row, "hdop"),
+        },
+        "env": env,
+        "sys": {},
+    }
+    rec, warnings = normalize_telemetry(
+        msg, device_id, "upload", allow_agps_fallback=False, derive_aqi=False
+    )
+    ts_warnings = [w for w in warnings if w.startswith("ts:")]
+    if ts_warnings:
+        raise _RideRowError("; ".join(ts_warnings))
+    return rec, warnings
+
+
+def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict], int, int]:
+    """Return (accepted records, first row errors, total rejected, warning count)."""
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "CSV must be UTF-8")
+    if not text.strip():
+        raise HTTPException(400, "empty CSV body")
+
+    reader = csv.DictReader(io.StringIO(text))
+    fields = [(f or "").strip() for f in (reader.fieldnames or [])]
+    missing = [c for c in RIDE_CSV_COLUMNS if c not in fields]
+    if missing:
+        raise HTTPException(400, f"CSV header missing columns: {', '.join(missing)}")
+    reader.fieldnames = fields
+
+    accepted: list[dict] = []
+    errors: list[dict] = []
+    rejected = 0
+    warnings_total = 0
+    for index, row in enumerate(reader, start=1):
+        if index > MAX_RIDE_ROWS:
+            raise HTTPException(413, f"ride larger than {MAX_RIDE_ROWS} rows")
+        try:
+            rec, warnings = _ride_row_message(row, device_id)
+        except _RideRowError as e:
+            rejected += 1
+            if len(errors) < 10:
+                errors.append({"row": index, "error": str(e)})
+            continue
+        accepted.append(rec)
+        warnings_total += len(warnings)
+    return accepted, errors, rejected, warnings_total
+
+
+def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
+    sha256 = hashlib.sha256(raw).hexdigest()
+    existing = store.find_ride_by_hash(device_id, sha256)
+    if existing:
+        return {
+            "ok": True,
+            "ride_id": existing["id"],
+            "inserted": 0,
+            "rejected": existing.get("rejected_count") or 0,
+            "warnings": 0,
+            "samples": existing["sample_count"],
+            "duration_s": existing["duration_s"],
+            "distance_m": existing["distance_m"],
+            "duplicate": True,
+        }
+
+    accepted, errors, rejected, warnings_total = _parse_ride_csv(raw, device_id)
+    if not accepted:
+        store.add_log("device", "ride_rejected",
+                      f"Ride upload {filename} had no valid rows ({rejected} errors)", level="WARN",
+                      device_id=device_id)
+        raise HTTPException(400, {"message": "no valid rows in CSV", "rejected": rejected, "errors": errors})
+
+    if warnings_total:
+        store.add_log("device", "ride_partial",
+                      f"Ride {filename}: {warnings_total} out-of-range value(s) nulled", level="WARN",
+                      device_id=device_id)
+
+    duplicate, ride = store.save_ride(device_id, filename, sha256, accepted, rejected)
+    if duplicate:
+        return {
+            "ok": True,
+            "ride_id": ride["id"],
+            "inserted": 0,
+            "rejected": ride.get("rejected_count") or 0,
+            "warnings": warnings_total,
+            "samples": ride["sample_count"],
+            "duration_s": ride["duration_s"],
+            "distance_m": ride["distance_m"],
+            "duplicate": True,
+        }
+    return {
+        "ok": True,
+        "ride_id": ride["id"],
+        "inserted": len(accepted),
+        "rejected": rejected,
+        "warnings": warnings_total,
+        "samples": ride["sample_count"],
+        "duration_s": ride["duration_s"],
+        "distance_m": ride["distance_m"],
+        "duplicate": False,
+    }
 
 
 async def _housekeeping() -> None:
@@ -307,6 +482,51 @@ def device_config(device_id: str = Depends(auth.require_device)):
     return store.device_config_payload(device_id) or {"version": 0, **DeviceConfig().model_dump()}
 
 
+@app.post("/api/devices/{device_id}/rides")
+async def upload_ride(device_id: str, request: Request, auth_device: str = Depends(auth.require_device)):
+    """Upload a CSV ride recorded on the device SD card (raw text/csv or multipart `file`)."""
+    if device_id != auth_device:
+        raise HTTPException(403, "device_id does not match authenticated device")
+    _device_or_404(device_id)
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    filename = request.headers.get("x-filename") or ""
+
+    try:
+        declared_size = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared_size = 0
+    # Multipart adds boundary/header overhead, so only reject clearly oversized
+    # bodies here; the exact file size is checked below.
+    if declared_size > MAX_RIDE_BYTES + 64 * 1024:
+        raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            raise HTTPException(400, "multipart body must include a 'file' field")
+        size = getattr(upload, "size", None)
+        if size is not None and size > MAX_RIDE_BYTES:
+            raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+        raw = await upload.read(MAX_RIDE_BYTES + 1)
+        filename = filename or getattr(upload, "filename", "") or ""
+    elif "text/csv" in content_type or "application/csv" in content_type:
+        chunks = bytearray()
+        async for chunk in request.stream():
+            if len(chunks) + len(chunk) > MAX_RIDE_BYTES:
+                raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+            chunks.extend(chunk)
+        raw = bytes(chunks)
+    else:
+        raise HTTPException(415, "expected Content-Type text/csv or multipart/form-data")
+
+    if len(raw) > MAX_RIDE_BYTES:
+        raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
+    safe_name = os.path.basename((filename or "ride.csv").replace("\\", "/"))[:200] or "ride.csv"
+    return await asyncio.to_thread(_process_ride_upload, device_id, safe_name, raw)
+
+
 # ============================ user endpoints ===========================
 
 @app.get("/api/devices")
@@ -403,6 +623,50 @@ def track(device_id: str, user: str = Depends(auth.require_user),
 def rejected(device_id: str, user: str = Depends(auth.require_user), limit: int = Query(50, ge=1, le=500)):
     _device_or_404(device_id)
     return store.rejected(device_id, limit)
+
+
+@app.get("/api/devices/{device_id}/rides")
+def device_rides(device_id: str, user: str = Depends(auth.require_user),
+                 limit: int = Query(50, ge=1, le=200)):
+    _device_or_404(device_id)
+    return store.list_rides(device_id, limit)
+
+
+@app.get("/api/rides/{ride_id}")
+def ride_detail(ride_id: str, user: str = Depends(auth.require_user)):
+    ride = store.get_ride(ride_id)
+    if not ride:
+        raise HTTPException(404, "ride not found")
+    device = store.public_device(store.get_device(ride["device_id"]))
+    return {
+        **ride,
+        "track": store.ride_track(ride_id),
+        "device": device,
+        "config": store.device_config_payload(ride["device_id"]),
+    }
+
+
+@app.get("/api/rides/{ride_id}/export.csv")
+def ride_export_csv(ride_id: str, user: str = Depends(auth.require_user)):
+    ride = store.get_ride(ride_id)
+    if not ride:
+        raise HTTPException(404, "ride not found")
+    rows = db.query("SELECT * FROM telemetry WHERE ride_id = ? ORDER BY ts, id", (ride_id,))
+    buf = io.StringIO(newline="")
+    writer = csv.DictWriter(buf, fieldnames=CSV_COLS, extrasaction="ignore", lineterminator="\r\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    name = f"ride_{ride_id}.csv"
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.delete("/api/rides/{ride_id}")
+def remove_ride(ride_id: str, user: str = Depends(auth.require_user)):
+    if not store.get_ride(ride_id):
+        raise HTTPException(404, "ride not found")
+    removed = store.delete_ride(ride_id)
+    return {"ok": True, "deleted_samples": removed}
 
 
 @app.get("/api/devices/{device_id}/config")
@@ -523,9 +787,11 @@ def delete_logs(user: str = Depends(auth.require_user), device_id: str | None = 
     return {"ok": True, "cleared": cleared}
 
 
-CSV_COLS = ["ts", "received_at", "seq", "ts_source", "replay", "transport", "gps_fix", "lat", "lon", "alt",
-            "speed_kmh", "course", "sats", "hdop", "temp_c", "humidity", "pressure_hpa", "gas_kohm", "aqi",
-            "aqi_source", "eco2_ppm", "tvoc_ppb", "rssi", "heap", "fw"]
+CSV_COLS = ["ts", "received_at", "seq", "ts_source", "replay", "transport", "ride_id", "gps_fix",
+            "lat", "lon", "alt", "speed_kmh", "course", "sats", "hdop", "temp_c", "humidity",
+            "pressure_hpa", "gas_kohm", "aqi", "aqi_source", "eco2_ppm", "tvoc_ppb",
+            "pm1", "pm2_5", "pm4", "pm10", "nc0_5", "nc1", "nc2_5", "nc4", "nc10",
+            "rssi", "heap", "fw"]
 
 
 @app.get("/api/devices/{device_id}/export.csv")

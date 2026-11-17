@@ -51,6 +51,17 @@
 #define PIN_GPS_RX 35
 #define PIN_GPS_TX -1
 
+// microSD / TF slot (SPI). Note: the TF slot and XPT2046 touch share the VSPI
+// peripheral, so sdlog.cpp switches the bus pins around SD operations.
+#define PIN_SD_CS 5
+#define PIN_SD_MOSI 23
+#define PIN_SD_MISO 19
+#define PIN_SD_SCK 18
+#define SD_SPI_FREQ_HZ 4000000
+#define SDLOG_FLUSH_SAMPLES 10
+#define SDLOG_UPLOAD_INTERVAL_MS 60000UL
+#define SDLOG_MAX_UPLOAD_BYTES (2 * 1024 * 1024)
+
 // Telemetry & buffering
 #define TELEMETRY_BUFFER_CAPACITY 180
 #define HTTP_BATCH_LIMIT 20

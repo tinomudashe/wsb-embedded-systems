@@ -45,7 +45,20 @@ def _str(v: Any, n: int) -> str | None:
     return v[:n] if isinstance(v, str) else None
 
 
-def normalize_telemetry(msg: Any, device_id: str, transport: str) -> tuple[dict, list[str]]:
+def normalize_telemetry(
+    msg: Any,
+    device_id: str,
+    transport: str,
+    *,
+    allow_agps_fallback: bool = True,
+    derive_aqi: bool = True,
+) -> tuple[dict, list[str]]:
+    """Validate a nested telemetry message and flatten it into a telemetry row.
+
+    ``allow_agps_fallback`` and ``derive_aqi`` keep the live-ingest behaviour
+    unchanged while letting ride uploads store only what the CSV actually
+    contains (no synthetic GPS fix / AQI for historical rows).
+    """
     if not isinstance(msg, dict):
         raise ValidationError("payload must be a JSON object")
     if "device_id" in msg and msg["device_id"] != device_id:
@@ -86,8 +99,19 @@ def normalize_telemetry(msg: Any, device_id: str, transport: str) -> tuple[dict,
     aqi = _num(env.get("aqi"), 0, 500, "env.aqi", w)
     aqi_source = _str(env.get("aqi_source"), 20)
 
+    # Optional particulate-matter fields (SPS30 or similar). Carried through when present.
+    pm1 = _num(env.get("pm1"), 0, 1000, "env.pm1", w)
+    pm2_5 = _num(env.get("pm2_5"), 0, 1000, "env.pm2_5", w)
+    pm4 = _num(env.get("pm4"), 0, 1000, "env.pm4", w)
+    pm10 = _num(env.get("pm10"), 0, 1000, "env.pm10", w)
+    nc0_5 = _num(env.get("nc0_5"), 0, 10000, "env.nc0_5", w)
+    nc1 = _num(env.get("nc1"), 0, 10000, "env.nc1", w)
+    nc2_5 = _num(env.get("nc2_5"), 0, 10000, "env.nc2_5", w)
+    nc4 = _num(env.get("nc4"), 0, 10000, "env.nc4", w)
+    nc10 = _num(env.get("nc10"), 0, 10000, "env.nc10", w)
+
     # If BME280 is attached (no gas resistor), derive indoor environmental AQI estimate from T + RH
-    if aqi is None and temp_c is not None and humidity is not None:
+    if derive_aqi and aqi is None and temp_c is not None and humidity is not None:
         hum_pen = abs(humidity - 45.0) * 1.2
         temp_pen = max(0.0, abs(temp_c - 22.0) - 1.5) * 4.5
         aqi = round(min(500.0, max(12.0, 22.0 + hum_pen + temp_pen)), 0)
@@ -100,7 +124,7 @@ def normalize_telemetry(msg: Any, device_id: str, transport: str) -> tuple[dict,
     course = _num(gps.get("course"), 0, 360, "gps.course", w) if has_fix else None
 
     # Indoor Assisted-GPS (A-GPS) fallback when UART GPS has no sky view indoors
-    if not has_fix:
+    if allow_agps_fallback and not has_fix:
         has_fix = True
         lat = 54.3757
         lon = 18.5987
@@ -123,6 +147,7 @@ def normalize_telemetry(msg: Any, device_id: str, transport: str) -> tuple[dict,
         "uptime_ms": msg["uptime_ms"] if _is_int(msg.get("uptime_ms")) else None,
         "replay": 1 if msg.get("replay") is True else 0,
         "transport": transport,
+        "ride_id": None,
         "gps_fix": 1 if has_fix else 0,
         "lat": lat,
         "lon": lon,
@@ -139,6 +164,15 @@ def normalize_telemetry(msg: Any, device_id: str, transport: str) -> tuple[dict,
         "aqi_source": aqi_source,
         "eco2_ppm": _num(env.get("eco2_ppm"), 0, 65000, "env.eco2_ppm", w),
         "tvoc_ppb": _num(env.get("tvoc_ppb"), 0, 65000, "env.tvoc_ppb", w),
+        "pm1": pm1,
+        "pm2_5": pm2_5,
+        "pm4": pm4,
+        "pm10": pm10,
+        "nc0_5": nc0_5,
+        "nc1": nc1,
+        "nc2_5": nc2_5,
+        "nc4": nc4,
+        "nc10": nc10,
         "rssi": rssi if _is_int(rssi) and -130 < rssi <= 0 else None,
         "heap": sys_["heap"] if _is_int(sys_.get("heap")) else None,
         "buffered": sys_["buffered"] if _is_int(sys_.get("buffered")) else None,
