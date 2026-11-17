@@ -73,6 +73,7 @@ int s_lastAqiBand = -99;
 // System tab REC control cache
 bool s_lastRecActive = false;
 size_t s_lastRecPending = 0;
+size_t s_lastRecProblems = 0;
 bool s_recUiDrawn = false;
 
 // Thread-safe onboard toast state
@@ -843,19 +844,24 @@ void drawSysPage(const EnvReading& env,
   // microSD ride recorder control (tap the full-width button below the rows).
   bool recActive = sdlogIsActive();
   size_t pending = sdlogPendingCount();
-  if (fullRedraw || !s_recUiDrawn || recActive != s_lastRecActive || pending != s_lastRecPending) {
+  size_t problems = sdlogProblemCount();
+  if (fullRedraw || !s_recUiDrawn || recActive != s_lastRecActive ||
+      pending != s_lastRecPending || problems != s_lastRecProblems) {
     s_lastRecActive = recActive;
     s_lastRecPending = pending;
+    s_lastRecProblems = problems;
     s_recUiDrawn = true;
 
     drawBlueButton(SYS_REC_BTN_X, SYS_REC_BTN_Y, SYS_REC_BTN_W, SYS_REC_BTN_H,
                    recActive ? "Stop REC" : "Start REC");
 
-    char recBuf[36];
+    char recBuf[40];
     if (recActive) {
-      snprintf(recBuf, sizeof(recBuf), "REC  |  %u pending", static_cast<unsigned>(pending));
+      snprintf(recBuf, sizeof(recBuf), "REC  %u q  %u parked",
+               static_cast<unsigned>(pending), static_cast<unsigned>(problems));
     } else {
-      snprintf(recBuf, sizeof(recBuf), "SD log  |  %u pending", static_cast<unsigned>(pending));
+      snprintf(recBuf, sizeof(recBuf), "SD log  %u q  %u parked",
+               static_cast<unsigned>(pending), static_cast<unsigned>(problems));
     }
     s_tft.setTextFont(1);
     s_tft.setTextDatum(ML_DATUM);

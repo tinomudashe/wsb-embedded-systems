@@ -1,9 +1,11 @@
 #include "sdlog.h"
 
+#include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <SD.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -11,6 +13,7 @@
 #include <freertos/semphr.h>
 
 #include "config.h"
+#include "gps.h"
 #include "net.h"
 #include "settings.h"
 
@@ -18,19 +21,31 @@ namespace {
 
 constexpr const char* CSV_HEADER =
     "ts,lat,lon,alt,speed_kmh,sats,hdop,temp_c,humidity,pressure_hpa,"
-    "pm1,pm2_5,pm4,pm10,nc0_5,nc1,nc2_5,nc4,nc10,aqi";
+    "pm1,pm2_5,pm4,pm10,nc0_5,nc1,nc2_5,nc4,nc10,aqi,gas_kohm,eco2_ppm,tvoc_ppb";
 
-constexpr size_t LINE_MAX = 240;
+constexpr size_t LINE_MAX = 280;
 constexpr size_t BUFFER_MAX = SDLOG_FLUSH_SAMPLES * LINE_MAX;
 
 SemaphoreHandle_t s_mutex = nullptr;
-bool s_active = false;
+std::atomic<bool> s_active{false};
+std::atomic<bool> s_uploading{false};
+// Set while the bus is routed to the SD pins but the state mutex is released
+// (during the streaming HTTP upload). Touch code must not touch SPI then.
+std::atomic<bool> s_busBusy{false};
+std::atomic<size_t> s_pending{0};
+std::atomic<size_t> s_problems{0};
+
+bool s_mounted = false;
+bool s_fileCreated = false;
 char s_path[48] = "";
 char s_buf[BUFFER_MAX];
 size_t s_bufLen = 0;
 size_t s_bufSamples = 0;
-size_t s_pending = 0;
 uint32_t s_dropped = 0;
+
+struct UploadGuard {
+  ~UploadGuard() { s_uploading.store(false); }
+};
 
 const char* baseName(const char* path) {
   if (!path) return "";
@@ -38,10 +53,20 @@ const char* baseName(const char* path) {
   return slash ? slash + 1 : path;
 }
 
+bool endsWith(const char* text, const char* suffix) {
+  size_t textLen = strlen(text);
+  size_t suffixLen = strlen(suffix);
+  return textLen >= suffixLen && strcmp(text + textLen - suffixLen, suffix) == 0;
+}
+
 bool isRideCsv(const char* name) {
   const char* base = baseName(name);
-  size_t len = strlen(base);
-  return len > 9 && strncmp(base, "ride_", 5) == 0 && strcmp(base + len - 4, ".csv") == 0;
+  return strlen(base) > 9 && strncmp(base, "ride_", 5) == 0 && endsWith(base, ".csv");
+}
+
+bool isProblemFile(const char* name) {
+  const char* base = baseName(name);
+  return endsWith(base, ".csv.big") || endsWith(base, ".csv.bad");
 }
 
 bool takeMutex() {
@@ -52,54 +77,81 @@ void giveMutex() {
   if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
-// The TF slot and the XPT2046 touch panel share the VSPI peripheral. SD
-// operations briefly route the bus to the TF pins and restore the touch pins
-// afterwards; everything is serialized with s_mutex.
-bool mountSdLocked() {
+// The TF slot and the XPT2046 touch panel share the VSPI peripheral. While a
+// recording is active the card stays mounted; the pins are switched to the SD
+// side only for actual file I/O and restored to the touch side afterwards.
+void busToSdLocked() {
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-  if (!SD.begin(PIN_SD_CS, SPI, SD_SPI_FREQ_HZ)) {
-    SPI.begin(PIN_TOUCH_CLK, PIN_TOUCH_MISO, PIN_TOUCH_MOSI, PIN_TOUCH_CS);
-    return false;
-  }
-  return true;
 }
 
-void unmountSdLocked() {
-  SD.end();
+void busToTouchLocked() {
   SPI.begin(PIN_TOUCH_CLK, PIN_TOUCH_MISO, PIN_TOUCH_MOSI, PIN_TOUCH_CS);
 }
 
-size_t scanPendingLocked() {
-  size_t count = 0;
-  File dir = SD.open("/");
-  if (!dir) return 0;
-  for (;;) {
-    File entry = dir.openNextFile();
-    if (!entry) break;
-    const char* name = entry.name();
-    bool current = s_active && s_path[0] != '\0' && strcmp(baseName(name), baseName(s_path)) == 0;
-    if (!entry.isDirectory() && isRideCsv(name) && !current) {
-      ++count;
-    }
-    entry.close();
+bool mountSdLocked() {
+  busToSdLocked();
+  if (!SD.begin(PIN_SD_CS, SPI, SD_SPI_FREQ_HZ)) {
+    busToTouchLocked();
+    return false;
   }
-  dir.close();
-  return count;
+  s_mounted = true;
+  return true;
+}
+
+void releaseSdLocked() {
+  if (s_mounted) {
+    SD.end();
+    s_mounted = false;
+  }
+  busToTouchLocked();
+}
+
+void scanLocked() {
+  size_t pending = 0;
+  size_t problems = 0;
+  File dir = SD.open("/");
+  if (dir) {
+    for (;;) {
+      File entry = dir.openNextFile();
+      if (!entry) break;
+      const char* name = entry.name();
+      bool current = s_active.load() && s_path[0] != '\0' &&
+                     strcmp(baseName(name), baseName(s_path)) == 0;
+      if (!entry.isDirectory()) {
+        if (isRideCsv(name) && !current) {
+          ++pending;
+        } else if (isProblemFile(name)) {
+          ++problems;
+        }
+      }
+      entry.close();
+    }
+    dir.close();
+  }
+  s_pending.store(pending);
+  s_problems.store(problems);
 }
 
 bool flushLocked() {
-  if (s_bufLen == 0 || s_path[0] == '\0') return true;
-  if (!mountSdLocked()) return false;
+  if (s_bufLen == 0) return true;
+  if (!s_mounted && !mountSdLocked()) return false;
+  if (s_path[0] == '\0') return false;
 
+  busToSdLocked();
+  File f = SD.open(s_path, s_fileCreated ? FILE_APPEND : FILE_WRITE);
   bool ok = false;
-  File f = SD.open(s_path, FILE_APPEND);
   if (f) {
+    if (!s_fileCreated) {
+      f.print(CSV_HEADER);
+      f.print("\n");
+    }
     size_t written = f.write(reinterpret_cast<const uint8_t*>(s_buf), s_bufLen);
     f.flush();
     f.close();
     ok = (written == s_bufLen);
+    if (ok) s_fileCreated = true;
   }
-  unmountSdLocked();
+  busToTouchLocked();
 
   if (ok) {
     s_bufLen = 0;
@@ -132,6 +184,9 @@ bool formatRow(const TelemetrySample& s, char* line, size_t lineLen) {
   char hum[12] = "";
   char pres[12] = "";
   char aqi[8] = "";
+  char gas[12] = "";
+  char eco2[8] = "";
+  char tvoc[8] = "";
 
   bool fix = s.gps_fix;
   appendField(lat, sizeof(lat), fix, "%.6f", s.lat);
@@ -148,11 +203,18 @@ bool formatRow(const TelemetrySample& s, char* line, size_t lineLen) {
   if (s.env_valid_mask & ENV_BIT_AQI) {
     snprintf(aqi, sizeof(aqi), "%d", static_cast<int>(s.aqi));
   }
+  appendField(gas, sizeof(gas), (s.env_valid_mask & ENV_BIT_GAS) != 0, "%.2f", s.gas_kohm);
+  if (s.env_valid_mask & ENV_BIT_ECO2) {
+    snprintf(eco2, sizeof(eco2), "%u", static_cast<unsigned>(s.eco2_ppm));
+  }
+  if (s.env_valid_mask & ENV_BIT_TVOC) {
+    snprintf(tvoc, sizeof(tvoc), "%u", static_cast<unsigned>(s.tvoc_ppb));
+  }
 
   // PM1..NC10 stay empty until an SPS30 (or similar) driver is added.
   int n = snprintf(line, lineLen,
-                   "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,,,,,,,,,,%s\n",
-                   ts, lat, lon, alt, speed, sats, hdop, temp, hum, pres, aqi);
+                   "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,,,,,,,,,,%s,%s,%s,%s\n",
+                   ts, lat, lon, alt, speed, sats, hdop, temp, hum, pres, aqi, gas, eco2, tvoc);
   return n > 0 && static_cast<size_t>(n) < lineLen;
 }
 
@@ -166,10 +228,51 @@ bool makeRidePath(char* out, size_t outLen, time_t stamp) {
   return true;
 }
 
+time_t bestEpoch() {
+  time_t now = time(nullptr);
+  if (now >= 1700000000L) return now;
+  GpsReading gps = gpsGetReading();
+  if (gps.utcValid && gps.utcEpochMs > 0) {
+    return static_cast<time_t>(gps.utcEpochMs / 1000LL);
+  }
+  return 0;
+}
+
+bool countDataRows(File& f, size_t& rows) {
+  if (!f.seek(0)) return false;
+  size_t newlines = 0;
+  int last = '\n';
+  uint8_t chunk[256];
+  for (;;) {
+    int n = f.read(chunk, sizeof(chunk));
+    if (n <= 0) break;
+    for (int i = 0; i < n; ++i) {
+      if (chunk[i] == '\n') ++newlines;
+    }
+    last = chunk[n - 1];
+  }
+  if (!f.seek(0)) return false;
+  size_t lines = newlines + ((last != '\n') ? 1 : 0);
+  rows = (lines > 0) ? lines - 1 : 0;  // exclude the header
+  return true;
+}
+
+bool renameFileLocked(const char* path, const char* suffix) {
+  char renamed[64];
+  snprintf(renamed, sizeof(renamed), "%s%s", path, suffix);
+  return SD.rename(path, renamed);
+}
+
 }  // namespace
 
 bool sdlogBusLock(uint32_t timeoutMs) {
-  return s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+  if (!s_mutex || s_busBusy.load()) return false;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+  if (s_busBusy.load()) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
+  return true;
 }
 
 void sdlogBusUnlock() {
@@ -183,32 +286,50 @@ bool sdlogInit() {
   if (!s_mutex) return false;
 
   if (!takeMutex()) return false;
-  bool ok = mountSdLocked();
-  if (ok) {
-    s_pending = scanPendingLocked();
-    unmountSdLocked();
+  bool ok = false;
+  if (mountSdLocked()) {
+    scanLocked();
+    releaseSdLocked();
+    ok = true;
   }
   giveMutex();
-  Serial.printf("[SD] init %s, pending rides=%u\n", ok ? "ok" : "failed",
-                static_cast<unsigned>(s_pending));
+  Serial.printf("[SD] init %s, pending=%u parked=%u\n", ok ? "ok" : "failed",
+                static_cast<unsigned>(s_pending.load()),
+                static_cast<unsigned>(s_problems.load()));
   return ok;
 }
 
+void sdlogRefreshPending() {
+  if (!s_mutex) return;
+  if (s_active.load() || s_uploading.load()) return;
+  if (!sdlogBusLock(200)) return;
+  if (!s_active.load() && !s_uploading.load()) {
+    if (!s_mounted && !mountSdLocked()) {
+      sdlogBusUnlock();
+      return;
+    }
+    scanLocked();
+    releaseSdLocked();
+  }
+  sdlogBusUnlock();
+}
+
 bool sdlogStart() {
-  if (!takeMutex()) return false;
-  if (s_active) {
+  if (s_uploading.load()) return false;
+  if (!sdlogBusLock(200)) return false;
+  if (s_active.load()) {
     giveMutex();
     return true;
   }
 
-  time_t now = time(nullptr);
+  time_t now = bestEpoch();
   char path[48] = "";
   if (!makeRidePath(path, sizeof(path), now)) {
     giveMutex();
-    Serial.println("[SD] start refused: UTC clock not set");
+    Serial.println("[SD] start refused: no UTC clock (NTP/GPS)");
     return false;
   }
-  if (!mountSdLocked()) {
+  if (!s_mounted && !mountSdLocked()) {
     giveMutex();
     Serial.println("[SD] start refused: card mount failed");
     return false;
@@ -219,68 +340,81 @@ bool sdlogStart() {
     if (!makeRidePath(path, sizeof(path), now + bump)) path[0] = '\0';
   }
   if (path[0] == '\0' || SD.exists(path)) {
-    unmountSdLocked();
+    releaseSdLocked();
     giveMutex();
     Serial.println("[SD] start refused: could not allocate a unique filename");
     return false;
   }
 
-  bool ok = false;
-  File f = SD.open(path, FILE_WRITE);
-  if (f) {
-    f.print(CSV_HEADER);
-    f.print("\n");
-    f.flush();
-    f.close();
-    ok = true;
-  }
-
-  if (ok) {
-    snprintf(s_path, sizeof(s_path), "%s", path);
-    s_active = true;
-    s_bufLen = 0;
-    s_bufSamples = 0;
-    s_pending = scanPendingLocked();  // excludes the file being recorded
-    Serial.printf("[SD] recording -> %s\n", s_path);
-  }
-  unmountSdLocked();
+  snprintf(s_path, sizeof(s_path), "%s", path);
+  s_fileCreated = false;
+  s_bufLen = 0;
+  s_bufSamples = 0;
+  s_dropped = 0;
+  s_active.store(true);
+  scanLocked();               // excludes the still-empty current file
+  busToTouchLocked();         // card stays mounted until stop
   giveMutex();
-  return ok;
+
+  Serial.printf("[SD] recording -> %s\n", s_path);
+  return true;
 }
 
 void sdlogStop() {
-  if (!takeMutex()) return;
-  if (!s_active) {
+  if (!s_active.load()) return;
+  if (!sdlogBusLock(250)) return;
+  if (!s_active.load()) {
     giveMutex();
     return;
   }
 
   bool ok = flushLocked();
-  if (!ok) {
+  if (!ok && s_bufLen > 0) {
     Serial.println("[SD] final flush failed; buffered rows were lost");
+    s_dropped += s_bufSamples;
   }
+  s_active.store(false);
+
+  if (s_mounted) {
+    // Do not leave a header-only/partial file behind (e.g. start/stop before
+    // the first sample, or a failed first flush).
+    if (s_path[0] != '\0') {
+      busToSdLocked();
+      File f = SD.open(s_path, FILE_READ);
+      size_t size = f ? f.size() : 0;
+      if (f) f.close();
+      if (size <= strlen(CSV_HEADER) + 2) {
+        SD.remove(s_path);
+      }
+    }
+    scanLocked();
+    releaseSdLocked();
+  }
+
   Serial.printf("[SD] stopped %s (dropped=%lu)\n", s_path,
                 static_cast<unsigned long>(s_dropped));
-  s_active = false;
   s_path[0] = '\0';
+  s_fileCreated = false;
   s_bufLen = 0;
   s_bufSamples = 0;
-
-  if (mountSdLocked()) {
-    s_pending = scanPendingLocked();
-    unmountSdLocked();
-  }
   giveMutex();
 }
 
 bool sdlogIsActive() {
-  if (!takeMutex()) return false;
-  bool active = s_active;
-  giveMutex();
-  return active;
+  return s_active.load();
+}
+
+size_t sdlogPendingCount() {
+  return s_pending.load();
+}
+
+size_t sdlogProblemCount() {
+  return s_problems.load();
 }
 
 void sdlogWriteSample(const TelemetrySample& sample) {
+  if (!s_active.load()) return;
+
   char line[LINE_MAX];
   if (!formatRow(sample, line, sizeof(line))) {
     return;  // no valid UTC timestamp -> server would reject the row
@@ -288,14 +422,14 @@ void sdlogWriteSample(const TelemetrySample& sample) {
   size_t lineLen = strlen(line);
 
   if (!takeMutex()) return;
-  if (!s_active) {
+  if (!s_active.load()) {
     giveMutex();
     return;
   }
 
   if (s_bufLen + lineLen >= sizeof(s_buf)) {
     if (!flushLocked()) {
-      ++s_dropped;
+      s_dropped += s_bufSamples;
       s_bufLen = 0;
       s_bufSamples = 0;
     }
@@ -311,7 +445,7 @@ void sdlogWriteSample(const TelemetrySample& sample) {
 
   if (s_bufSamples >= SDLOG_FLUSH_SAMPLES) {
     if (!flushLocked()) {
-      ++s_dropped;
+      s_dropped += s_bufSamples;
       s_bufLen = 0;
       s_bufSamples = 0;
     }
@@ -319,54 +453,39 @@ void sdlogWriteSample(const TelemetrySample& sample) {
   giveMutex();
 }
 
-size_t sdlogPendingCount() {
-  if (!takeMutex()) return 0;
-  size_t n = s_pending;
-  giveMutex();
-  return n;
-}
-
 bool sdlogUploadPending() {
-  if (!s_mutex) return false;
+  if (!s_mutex || s_active.load()) return false;
+  if (s_uploading.exchange(true)) return false;
+  UploadGuard guard;
+
   DeviceCredentials cred = settingsGetCredentials();
   if (WiFi.status() != WL_CONNECTED || cred.device_id.length() == 0 || cred.device_key.length() == 0) {
     return false;
   }
 
-  char path[48] = "";
-  char filename[48] = "";
-  String body;
-
   if (!takeMutex()) return false;
-  if (s_active || s_pending == 0) {
+  if (s_active.load()) {
     giveMutex();
-    return false;  // never switch the shared bus away from a running recording
+    return false;
   }
-  if (!mountSdLocked()) {
+  if (!s_mounted && !mountSdLocked()) {
     giveMutex();
     return false;
   }
 
+  char path[48] = "";
+  char filename[48] = "";
+  File file;
   File dir = SD.open("/");
   if (dir) {
     for (;;) {
       File entry = dir.openNextFile();
       if (!entry) break;
-      bool candidate = !entry.isDirectory() && isRideCsv(entry.name());
-      if (candidate) {
+      if (!entry.isDirectory() && isRideCsv(entry.name())) {
         snprintf(path, sizeof(path), "/%s", baseName(entry.name()));
         snprintf(filename, sizeof(filename), "%s", baseName(entry.name()));
-        size_t size = entry.size();
-        if (size > 0 && size <= SDLOG_MAX_UPLOAD_BYTES) {
-          body.reserve(size + 1);
-          uint8_t chunk[256];
-          while (entry.available()) {
-            size_t n = entry.read(chunk, sizeof(chunk));
-            if (n == 0) break;
-            body.concat(reinterpret_cast<const char*>(chunk), n);
-          }
-        }
         entry.close();
+        file = SD.open(path, FILE_READ);
         break;
       }
       entry.close();
@@ -374,34 +493,38 @@ bool sdlogUploadPending() {
     dir.close();
   }
 
-  if (path[0] == '\0') {
-    s_pending = scanPendingLocked();
-    unmountSdLocked();
+  if (path[0] == '\0' || !file) {
+    if (file) file.close();
+    scanLocked();
+    releaseSdLocked();
     giveMutex();
     return false;
   }
 
-  if (body.length() == 0) {
-    // Zero-byte or oversized ride: move it aside so it cannot block the queue.
-    char parked[56];
-    snprintf(parked, sizeof(parked), "%s.big", path);
-    SD.rename(path, parked);
-    s_pending = scanPendingLocked();
-    unmountSdLocked();
+  size_t size = file.size();
+  size_t dataRows = 0;
+  if (size == 0 || size > SDLOG_MAX_UPLOAD_BYTES || !countDataRows(file, dataRows) || dataRows == 0) {
+    file.close();
+    bool renamed = renameFileLocked(path, ".big");
+    scanLocked();
+    releaseSdLocked();
     giveMutex();
-    netLogEvent("WARN", "sd", "Parked oversized/empty ride file");
+    Serial.printf("[SD] parked %s (%s)\n", path, renamed ? "empty/oversized/header-only" : "rename failed");
+    if (renamed) netLogEvent("WARN", "sd", "Parked unusable ride CSV");
     return false;
   }
-  unmountSdLocked();
-  giveMutex();
 
   WiFiClient client;
   HTTPClient http;
   String url = String("http://") + SERVER_HOST + ":" + String(HTTP_PORT) +
                "/api/devices/" + cred.device_id + "/rides";
-  http.setTimeout(8000);
+  http.setTimeout(15000);
   http.setReuse(false);
   if (!http.begin(client, url)) {
+    file.close();
+    scanLocked();
+    releaseSdLocked();
+    giveMutex();
     return false;
   }
   http.addHeader("Content-Type", "text/csv");
@@ -409,29 +532,65 @@ bool sdlogUploadPending() {
   http.addHeader("X-Device-Key", cred.device_key);
   http.addHeader("X-Filename", filename);
 
-  int code = http.POST(body);
+  // Stream from the file without buffering it in RAM. Release the state mutex
+  // during the network transfer (touch sees s_busBusy and skips SPI), then take
+  // it back for the rename/scan.
+  busToSdLocked();
+  s_busBusy.store(true);
+  giveMutex();
+  int code = http.sendRequest("POST", &file, size);
   String resp = (code > 0) ? http.getString() : "";
   http.end();
-
-  if (code < 200 || code >= 300) {
-    Serial.printf("[SD] ride upload %s failed -> %d (%s)\n", filename, code,
-                  HTTPClient::errorToString(code).c_str());
+  file.close();
+  if (!takeMutex()) {
+    s_busBusy.store(false);
     return false;
   }
+  s_busBusy.store(false);
 
-  if (!takeMutex()) return true;
-  if (mountSdLocked()) {
-    char done[56];
-    snprintf(done, sizeof(done), "%s.done", path);
-    if (!SD.rename(path, done)) {
+  bool uploadOk = false;
+  bool terminal = false;
+  if (code >= 200 && code < 300) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, resp);
+    long samples = doc["samples"] | -1L;
+    long inserted = doc["inserted"] | -1L;
+    long rejected = doc["rejected"] | -1L;
+    bool duplicate = doc["duplicate"] | false;
+    bool serverOk = doc["ok"] | false;
+    bool consistent = !err && serverOk && samples >= 0 && inserted >= 0 && rejected >= 0 &&
+                      static_cast<size_t>(samples + rejected) == dataRows &&
+                      (duplicate ? inserted == 0 : inserted == samples);
+    if (consistent) {
+      uploadOk = true;
+    } else {
+      Serial.printf("[SD] ride response inconsistent (%s, rows=%u): %s\n",
+                    err.c_str(), static_cast<unsigned>(dataRows), resp.c_str());
+      netLogEvent("WARN", "sd", "Ride upload response did not match CSV; will retry");
+    }
+  } else {
+    terminal = code >= 400 && code < 500 && code != 408 && code != 429;
+    Serial.printf("[SD] ride upload %s failed -> %d (%s)\n", filename, code,
+                  HTTPClient::errorToString(code).c_str());
+  }
+
+  if (uploadOk) {
+    if (!renameFileLocked(path, ".done")) {
       Serial.printf("[SD] uploaded %s but rename to .done failed\n", path);
     }
-    s_pending = scanPendingLocked();
-    unmountSdLocked();
+  } else if (terminal) {
+    if (renameFileLocked(path, ".bad")) {
+      netLogEvent("WARN", "sd", "Ride CSV rejected permanently; parked as .bad");
+    }
   }
+
+  scanLocked();
+  releaseSdLocked();
   giveMutex();
 
-  Serial.printf("[SD] uploaded %s -> %d %s\n", filename, code, resp.c_str());
-  netLogEvent("INFO", "sd", "Ride CSV uploaded to dashboard");
-  return true;
+  if (uploadOk) {
+    Serial.printf("[SD] uploaded %s -> %d %s\n", filename, code, resp.c_str());
+    netLogEvent("INFO", "sd", "Ride CSV uploaded to dashboard");
+  }
+  return uploadOk;
 }

@@ -21,8 +21,15 @@ void sdlogWriteSample(const TelemetrySample& sample);
 // Number of completed, not-yet-uploaded ride_*.csv files on the card (cached).
 size_t sdlogPendingCount();
 
+// Number of parked *.csv.big / *.csv.bad files (empty, oversized or rejected).
+size_t sdlogProblemCount();
+
+// Re-scans the card for pending/parked rides (boot, or periodically from net).
+void sdlogRefreshPending();
+
 // Attempts to POST one pending CSV to /api/devices/{id}/rides. On success the
-// file is renamed to *.csv.done. Returns true when a ride was uploaded.
+// file is renamed to *.csv.done; permanent 4xx responses become *.csv.bad.
+// Returns true when a ride was uploaded.
 bool sdlogUploadPending();
 
 // The TF slot and touch panel share VSPI. UI code brackets raw touch reads with

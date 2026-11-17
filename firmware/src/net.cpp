@@ -781,6 +781,7 @@ void netTaskFn(void* param) {
       if (wifiOk && (s_lastRideUploadMs == 0 ||
                      (now - s_lastRideUploadMs) >= SDLOG_UPLOAD_INTERVAL_MS)) {
         s_lastRideUploadMs = now;
+        sdlogRefreshPending();
         if (sdlogPendingCount() > 0) {
           sdlogUploadPending();
         }
