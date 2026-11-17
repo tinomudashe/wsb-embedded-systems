@@ -120,8 +120,8 @@ def _ride_row_message(row: dict, device_id: str) -> dict:
     return rec
 
 
-def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict]]:
-    """Return (accepted records, row errors). Raises HTTPException for bad header/size."""
+def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict], int]:
+    """Return (accepted records, first row errors, total rejected). Raises for bad header/size."""
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -138,15 +138,17 @@ def _parse_ride_csv(raw: bytes, device_id: str) -> tuple[list[dict], list[dict]]
 
     accepted: list[dict] = []
     errors: list[dict] = []
+    rejected = 0
     for index, row in enumerate(reader, start=1):
         if index > MAX_RIDE_ROWS:
             raise HTTPException(413, f"ride larger than {MAX_RIDE_ROWS} rows")
         try:
             accepted.append(_ride_row_message(row, device_id))
         except _RideRowError as e:
+            rejected += 1
             if len(errors) < 10:
                 errors.append({"row": index, "error": str(e)})
-    return accepted, errors
+    return accepted, errors, rejected
 
 
 def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
@@ -164,12 +166,12 @@ def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
             "duplicate": True,
         }
 
-    accepted, errors = _parse_ride_csv(raw, device_id)
+    accepted, errors, rejected = _parse_ride_csv(raw, device_id)
     if not accepted:
         store.add_log("device", "ride_rejected",
-                      f"Ride upload {filename} had no valid rows ({len(errors)} errors)", level="WARN",
+                      f"Ride upload {filename} had no valid rows ({rejected} errors)", level="WARN",
                       device_id=device_id)
-        raise HTTPException(400, {"message": "no valid rows in CSV", "errors": errors})
+        raise HTTPException(400, {"message": "no valid rows in CSV", "rejected": rejected, "errors": errors})
 
     duplicate, ride = store.save_ride(device_id, filename, sha256, accepted)
     if duplicate:
@@ -177,7 +179,7 @@ def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
             "ok": True,
             "ride_id": ride["id"],
             "inserted": 0,
-            "rejected": len(errors),
+            "rejected": rejected,
             "samples": ride["sample_count"],
             "duration_s": ride["duration_s"],
             "distance_m": ride["distance_m"],
@@ -187,7 +189,7 @@ def _process_ride_upload(device_id: str, filename: str, raw: bytes) -> dict:
         "ok": True,
         "ride_id": ride["id"],
         "inserted": len(accepted),
-        "rejected": len(errors),
+        "rejected": rejected,
         "samples": ride["sample_count"],
         "duration_s": ride["duration_s"],
         "distance_m": ride["distance_m"],

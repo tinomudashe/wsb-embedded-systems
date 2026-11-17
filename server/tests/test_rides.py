@@ -234,6 +234,16 @@ def test_invalid_csv_is_rejected(client):
     assert body["samples"] == 1
     assert body["rejected"] == 1
 
+    # The rejected counter is a total, while only the first 10 errors are returned.
+    many_bad = make_csv(
+        *[{"ts": f"bad-{i}", "lat": "54.37", "lon": "18.60"} for i in range(12)]
+    )
+    resp = upload(client, device_id, key, many_bad)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["rejected"] == 12
+    assert len(detail["errors"]) == 10
+
     assert upload(client, device_id, key, "not csv at all").status_code == 400
 
 

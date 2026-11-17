@@ -335,7 +335,13 @@ def _ride_metrics(records: list[dict]) -> dict:
             "avg": round(sum(vals) / len(vals), 2),
         }
 
-    stats = {field: agg(field) for field in _RIDE_STAT_FIELDS}
+    stats = {}
+    for field in _RIDE_STAT_FIELDS:
+        values = agg(field)
+        stats[field] = values
+        # Flat aliases keep parity with the existing /stats naming (temp_min, ...).
+        for key, value in values.items():
+            stats[f"{field}_{key}"] = value
     stats["fixes"] = len(fixes)
     stats["samples"] = len(recs)
 
