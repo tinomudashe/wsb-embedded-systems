@@ -496,7 +496,9 @@ async def upload_ride(device_id: str, request: Request, auth_device: str = Depen
         declared_size = int(request.headers.get("content-length") or 0)
     except ValueError:
         declared_size = 0
-    if declared_size > MAX_RIDE_BYTES:
+    # Multipart adds boundary/header overhead, so only reject clearly oversized
+    # bodies here; the exact file size is checked below.
+    if declared_size > MAX_RIDE_BYTES + 64 * 1024:
         raise HTTPException(413, f"ride larger than {MAX_RIDE_BYTES} bytes")
 
     if content_type.startswith("multipart/form-data"):
