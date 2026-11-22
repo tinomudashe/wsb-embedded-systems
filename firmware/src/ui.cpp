@@ -1066,9 +1066,13 @@ void uiPollTouch() {
       mappedX <= (SYS_REC_BTN_X + SYS_REC_BTN_W) &&
       mappedY >= SYS_REC_BTN_Y && mappedY <= (SYS_REC_BTN_Y + SYS_REC_BTN_H)) {
     if (sdlogIsActive()) {
-      sdlogStop();
-      uiShowToast("SD recording stopped", 2500);
-      netLogEvent("INFO", "sd", "Ride recording stopped");
+      // The recorder itself logs a WARN when it stayed active or dropped rows.
+      if (sdlogStop()) {
+        uiShowToast("SD recording stopped", 2500);
+        netLogEvent("INFO", "sd", "Ride recording stopped");
+      } else {
+        uiShowToast("SD stop failed: check card / still recording", 3500);
+      }
     } else if (sdlogStart()) {
       uiShowToast("SD recording started", 2500);
       netLogEvent("INFO", "sd", "Ride recording started");

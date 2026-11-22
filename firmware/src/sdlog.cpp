@@ -69,6 +69,13 @@ bool isProblemFile(const char* name) {
   return endsWith(base, ".csv.big") || endsWith(base, ".csv.bad");
 }
 
+// Uploaded rides are removed after a verified upload. A file that could not be
+// removed is renamed to this suffix and pruned on a later mount/upload pass.
+bool isDoneFile(const char* name) {
+  const char* base = baseName(name);
+  return endsWith(base, ".csv.done");
+}
+
 bool takeMutex() {
   return s_mutex && xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE;
 }
@@ -263,6 +270,42 @@ bool renameFileLocked(const char* path, const char* suffix) {
   return SD.rename(path, renamed);
 }
 
+// Removes already-uploaded *.csv.done files. The server already accepted them
+// (rows verified), so the card copy is redundant. Stops after maxRemove files
+// to bound the time spent holding the shared SPI bus. Returns the number removed.
+size_t removeDoneFilesLocked(size_t maxRemove) {
+  if (maxRemove == 0) return 0;
+  size_t removed = 0;
+  bool again = true;
+  while (again && removed < maxRemove) {
+    again = false;
+    char name[64] = "";
+    File dir = SD.open("/");
+    if (dir) {
+      for (;;) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        if (!entry.isDirectory() && isDoneFile(entry.name())) {
+          snprintf(name, sizeof(name), "/%s", baseName(entry.name()));
+          entry.close();
+          again = true;
+          break;
+        }
+        entry.close();
+      }
+      dir.close();
+    }
+    if (!again) break;
+    if (!SD.remove(name)) {
+      // Leave it for a later pass rather than spinning on it.
+      Serial.printf("[SD] could not remove uploaded %s\n", name);
+      break;
+    }
+    ++removed;
+  }
+  return removed;
+}
+
 }  // namespace
 
 bool sdlogBusLock(uint32_t timeoutMs) {
@@ -288,6 +331,11 @@ bool sdlogInit() {
   if (!takeMutex()) return false;
   bool ok = false;
   if (mountSdLocked()) {
+    size_t removed = removeDoneFilesLocked(8);
+    if (removed > 0) {
+      Serial.printf("[SD] pruned %u uploaded (.done) file(s) on mount\n",
+                    static_cast<unsigned>(removed));
+    }
     scanLocked();
     releaseSdLocked();
     ok = true;
@@ -360,12 +408,16 @@ bool sdlogStart() {
   return true;
 }
 
-void sdlogStop() {
-  if (!s_active.load()) return;
-  if (!sdlogBusLock(250)) return;
+bool sdlogStop() {
+  if (!s_active.load()) return true;
+  if (!sdlogBusLock(250)) {
+    Serial.println("[SD] stop failed: SD bus busy (timed out); still recording");
+    netLogEvent("WARN", "sd", "Stop REC timed out on the SD bus; still recording");
+    return false;
+  }
   if (!s_active.load()) {
     giveMutex();
-    return;
+    return true;
   }
 
   bool ok = flushLocked();
@@ -373,6 +425,7 @@ void sdlogStop() {
     Serial.println("[SD] final flush failed; buffered rows were lost");
     s_dropped += s_bufSamples;
   }
+  uint32_t dropped = s_dropped;
   s_active.store(false);
 
   if (s_mounted) {
@@ -393,11 +446,15 @@ void sdlogStop() {
 
   Serial.printf("[SD] stopped %s (dropped=%lu)\n", s_path,
                 static_cast<unsigned long>(s_dropped));
+  if (dropped > 0) {
+    netLogEvent("WARN", "sd", "Stop REC: rows were dropped (card write failed)");
+  }
   s_path[0] = '\0';
   s_fileCreated = false;
   s_bufLen = 0;
   s_bufSamples = 0;
   giveMutex();
+  return ok && dropped == 0;
 }
 
 bool sdlogIsActive() {
@@ -503,14 +560,35 @@ bool sdlogUploadPending() {
 
   size_t size = file.size();
   size_t dataRows = 0;
-  if (size == 0 || size > SDLOG_MAX_UPLOAD_BYTES || !countDataRows(file, dataRows) || dataRows == 0) {
+  if (!countDataRows(file, dataRows)) {
+    file.close();
+    scanLocked();
+    releaseSdLocked();
+    giveMutex();
+    Serial.printf("[SD] could not read %s; leaving it queued\n", path);
+    return false;
+  }
+  // The server answers 413 above SDLOG_MAX_UPLOAD_ROWS rows and the firmware
+  // treats every 413 as permanent, so stop such rides here (as .csv.big) rather
+  // than letting the upload strand them in .csv.bad.
+  const char* reason = nullptr;
+  if (size == 0 || size > SDLOG_MAX_UPLOAD_BYTES) {
+    reason = "empty or larger than the upload byte limit";
+  } else if (dataRows == 0) {
+    reason = "header-only";
+  } else if (dataRows > SDLOG_MAX_UPLOAD_ROWS) {
+    reason = "more than the upload row limit";
+  }
+  if (reason) {
     file.close();
     bool renamed = renameFileLocked(path, ".big");
     scanLocked();
     releaseSdLocked();
     giveMutex();
-    Serial.printf("[SD] parked %s (%s)\n", path, renamed ? "empty/oversized/header-only" : "rename failed");
-    if (renamed) netLogEvent("WARN", "sd", "Parked unusable ride CSV");
+    Serial.printf("[SD] parked %s (%s: size=%u rows=%u; %s)\n", path, reason,
+                  static_cast<unsigned>(size), static_cast<unsigned>(dataRows),
+                  renamed ? "renamed .big" : "rename failed");
+    if (renamed) netLogEvent("WARN", "sd", "Parked ride CSV that cannot be uploaded");
     return false;
   }
 
@@ -569,14 +647,20 @@ bool sdlogUploadPending() {
       netLogEvent("WARN", "sd", "Ride upload response did not match CSV; will retry");
     }
   } else {
-    terminal = code >= 400 && code < 500 && code != 408 && code != 429;
+    // 401/403 are retryable: credentials are re-read from settings on every
+    // attempt, so re-provisioning the device recovers the queued ride.
+    terminal = code >= 400 && code < 500 && code != 401 && code != 403 &&
+               code != 408 && code != 429;
     Serial.printf("[SD] ride upload %s failed -> %d (%s)\n", filename, code,
                   HTTPClient::errorToString(code).c_str());
   }
 
   if (uploadOk) {
-    if (!renameFileLocked(path, ".done")) {
-      Serial.printf("[SD] uploaded %s but rename to .done failed\n", path);
+    // Drop the file after the verified upload: the server is the durable copy and
+    // keeping it would eventually fill the card. If removal fails, rename it to
+    // .done so the next scan/prune pass removes it instead of re-uploading it.
+    if (!SD.remove(path) && renameFileLocked(path, ".done")) {
+      Serial.printf("[SD] uploaded %s but could not remove it; queued .done for pruning\n", path);
     }
   } else if (terminal) {
     if (renameFileLocked(path, ".bad")) {
@@ -584,12 +668,14 @@ bool sdlogUploadPending() {
     }
   }
 
+  size_t pruned = removeDoneFilesLocked(4);
   scanLocked();
   releaseSdLocked();
   giveMutex();
 
   if (uploadOk) {
-    Serial.printf("[SD] uploaded %s -> %d %s\n", filename, code, resp.c_str());
+    Serial.printf("[SD] uploaded %s -> %d %s (removed from card, pruned=%u)\n", filename, code,
+                  resp.c_str(), static_cast<unsigned>(pruned));
     netLogEvent("INFO", "sd", "Ride CSV uploaded to dashboard");
   }
   return uploadOk;

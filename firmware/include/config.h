@@ -61,6 +61,8 @@
 #define SDLOG_FLUSH_SAMPLES 10
 #define SDLOG_UPLOAD_INTERVAL_MS 60000UL
 #define SDLOG_MAX_UPLOAD_BYTES (2 * 1024 * 1024)
+// Server-side hard limit (HTTP 413 above this); must match the API.
+#define SDLOG_MAX_UPLOAD_ROWS 20000
 
 // Telemetry & buffering
 #define TELEMETRY_BUFFER_CAPACITY 180
