@@ -566,6 +566,7 @@ bool sdlogUploadPending() {
     releaseSdLocked();
     giveMutex();
     Serial.printf("[SD] could not read %s; leaving it queued\n", path);
+    netLogEvent("WARN", "sd", "Could not read ride CSV from card; will retry");
     return false;
   }
   // The server answers 413 above SDLOG_MAX_UPLOAD_ROWS rows and the firmware
@@ -659,8 +660,13 @@ bool sdlogUploadPending() {
     // Drop the file after the verified upload: the server is the durable copy and
     // keeping it would eventually fill the card. If removal fails, rename it to
     // .done so the next scan/prune pass removes it instead of re-uploading it.
-    if (!SD.remove(path) && renameFileLocked(path, ".done")) {
-      Serial.printf("[SD] uploaded %s but could not remove it; queued .done for pruning\n", path);
+    if (!SD.remove(path)) {
+      if (renameFileLocked(path, ".done")) {
+        Serial.printf("[SD] uploaded %s but could not remove it; queued .done for pruning\n", path);
+      } else {
+        Serial.printf("[SD] uploaded %s but could not remove or rename it\n", path);
+        netLogEvent("WARN", "sd", "Uploaded ride could not be removed from the card");
+      }
     }
   } else if (terminal) {
     if (renameFileLocked(path, ".bad")) {

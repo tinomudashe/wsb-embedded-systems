@@ -1071,7 +1071,7 @@ void uiPollTouch() {
         uiShowToast("SD recording stopped", 2500);
         netLogEvent("INFO", "sd", "Ride recording stopped");
       } else {
-        uiShowToast("SD stop failed: check card / still recording", 3500);
+        uiShowToast("SD stop warning: check card & logs", 3500);
       }
     } else if (sdlogStart()) {
       uiShowToast("SD recording started", 2500);
