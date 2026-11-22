@@ -92,9 +92,13 @@ available:
 
 On the ESP32, insert a microSD card and use **Start REC / Stop REC** on the
 System tab. Samples are buffered and appended to `/ride_YYYYMMDD_HHMMSS.csv`;
-completed files upload at most once per minute while Wi-Fi is available and are
-renamed `.done` after a successful upload. Files that fail permanently are
-parked as `.csv.bad`; oversized or empty files are parked as `.csv.big`.
+completed files upload at most once per minute while Wi-Fi is available, and
+after the server confirms every row the copy is removed from the card (the
+server is the durable copy; a copy that cannot be removed is renamed `.csv.done`
+and pruned later). Files the server rejects permanently are parked as
+`.csv.bad`; empty, oversized, header-only or over-20,000-row files are parked as
+`.csv.big`. HTTP 401/403/408/429 are retried, so re-provisioning a device
+recovers its queued rides.
 Recording requires a valid UTC clock (NTP or GPS UTC); PM columns stay empty
 until a particulate-matter sensor driver is added.
 
@@ -133,7 +137,11 @@ Pip and npm caches use `actions/cache`; no repository secrets are needed.
 ## Backup
 
 `server/deploy/backup.sh` makes a consistent online copy with `sqlite3 .backup`
-and prunes files older than `RETENTION_DAYS` (default 7).
+and prunes files older than `BACKUP_RETENTION_DAYS` (default 7; `0` disables
+pruning). A legacy `RETENTION_DAYS` is accepted as a fallback, but it is the
+server's telemetry retention setting, not a backup setting, so set
+`BACKUP_RETENTION_DAYS` explicitly (for example from a wrapper that makes it
+available to the cron job).
 
 ```bash
 DB_PATH=/var/lib/wsb/telemetry.db BACKUP_DIR=/var/backups/wsb \
