@@ -67,6 +67,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Check committed bundle is fresh
+        run: git diff --exit-code -- ../server/static || { echo "committed server/static is stale; run npm run build and commit the result"; exit 1; }
+
   firmware:
     name: Firmware (PlatformIO)
     runs-on: ubuntu-latest
