@@ -1,8 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
+// MapLibre v6 derives its worker URL from import.meta.url, which points at the
+// bundled chunk after a Vite build. Emit the worker as an asset and set the URL.
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import Icon from './Icon';
 import { fmt } from './MetricCards';
+
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
 const SATELLITE_STYLE = {
   version: 8,

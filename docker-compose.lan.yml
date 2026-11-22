@@ -1,0 +1,35 @@
+# LAN-only override for testing real firmware against the local stack.
+#
+# This switches Mosquitto to password/ACL authentication. Generate the
+# password file first (see README):
+#
+#   mkdir -p /tmp/wsb-mosquitto
+#   mosquitto_passwd -c -b /tmp/wsb-mosquitto/passwd backend "$MQTT_PASS"
+#   mosquitto_passwd -b /tmp/wsb-mosquitto/passwd cyd-01 "$DEVICE_KEY"
+#
+# Then start with both files and explicit non-loopback bind addresses:
+#
+#   API_BIND=0.0.0.0 MQTT_BIND=0.0.0.0 \
+#     docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
+#
+# Do not combine this override with mosquitto-local.conf (anonymous access).
+services:
+  mosquitto:
+    environment:
+      MQTT_USER: ${MQTT_USER:-backend}
+      MQTT_PASS: ${MQTT_PASS:?set MQTT_PASS in .env}
+    healthcheck:
+      # Authenticated probe on a topic the backend ACL allows it to publish to.
+      test:
+        - CMD-SHELL
+        - 'mosquitto_pub -h 127.0.0.1 -p 1883 -u "$$MQTT_USER" -P "$$MQTT_PASS" -t wsb/devices/health/config -m ok'
+    volumes:
+      - ./server/deploy/mosquitto-local-auth.conf:/mosquitto/config/mosquitto.conf:ro
+      - /tmp/wsb-mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./server/deploy/mosquitto.acl:/mosquitto/config/acl:ro
+      - wsb-mosquitto-data:/mosquitto/data
+      - wsb-mosquitto-log:/mosquitto/log
+
+volumes:
+  wsb-mosquitto-data:
+  wsb-mosquitto-log:

@@ -8,6 +8,7 @@ import InteractiveMap from './components/InteractiveMap';
 import CalibrationPanel from './components/CalibrationPanel';
 import RecentReadingsTable from './components/RecentReadingsTable';
 import LogsPanel from './components/LogsPanel';
+import RidesPanel from './components/RidesPanel';
 import CydBoardEmulator from './components/CydBoardEmulator';
 import ProfileModal from './components/ProfileModal';
 import RegisterDeviceModal from './components/RegisterDeviceModal';
@@ -645,6 +646,8 @@ export default function App() {
           config={detail?.config}
           onSaveConfig={handleSaveConfig}
         />
+
+        <RidesPanel deviceId={deviceId} api={api} onNotify={showToast} />
 
         <RecentReadingsTable deviceId={deviceId} recent={recent} />
 

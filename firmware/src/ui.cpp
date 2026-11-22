@@ -13,6 +13,7 @@
 #include "config.h"
 #include "portal.h"
 #include "power.h"
+#include "sdlog.h"
 
 namespace {
 
@@ -36,6 +37,11 @@ constexpr int TOAST_X = 16;
 constexpr int TOAST_Y = 28;
 constexpr int TOAST_W = 288;
 constexpr int TOAST_H = 26;
+
+constexpr int SYS_REC_BTN_X = 14;
+constexpr int SYS_REC_BTN_Y = 180;
+constexpr int SYS_REC_BTN_W = 140;
+constexpr int SYS_REC_BTN_H = 24;
 
 TFT_eSPI s_tft;
 TFT_eSprite s_statusSpr(&s_tft);
@@ -63,6 +69,12 @@ char s_lastQrPayload[196] = "";
 bool s_lastQrApMode = false;
 bool s_lastQrHasCreds = false;
 int s_lastAqiBand = -99;
+
+// System tab REC control cache
+bool s_lastRecActive = false;
+size_t s_lastRecPending = 0;
+size_t s_lastRecProblems = 0;
+bool s_recUiDrawn = false;
 
 // Thread-safe onboard toast state
 SemaphoreHandle_t s_toastMutex = nullptr;
@@ -755,7 +767,7 @@ void drawQrPage(const NetStatus& net, bool fullRedraw) {
 }
 
 void drawSysRow(int row, const char* label, const char* value, uint16_t valCol) {
-  int y = 35 + row * 19;
+  int y = 32 + row * 16;
   s_tft.setTextFont(2);
   s_tft.setTextDatum(TL_DATUM);
   s_tft.setTextPadding(92);
@@ -828,6 +840,36 @@ void drawSysPage(const EnvReading& env,
   snprintf(buf, sizeof(buf), "BL:%u LDR:%u",
            powerGetBacklightDuty(), powerGetLdrRaw());
   drawSysRow(8, "Display/LDR", buf, COL_TEXT);
+
+  // microSD ride recorder control (tap the full-width button below the rows).
+  bool recActive = sdlogIsActive();
+  size_t pending = sdlogPendingCount();
+  size_t problems = sdlogProblemCount();
+  if (fullRedraw || !s_recUiDrawn || recActive != s_lastRecActive ||
+      pending != s_lastRecPending || problems != s_lastRecProblems) {
+    s_lastRecActive = recActive;
+    s_lastRecPending = pending;
+    s_lastRecProblems = problems;
+    s_recUiDrawn = true;
+
+    drawBlueButton(SYS_REC_BTN_X, SYS_REC_BTN_Y, SYS_REC_BTN_W, SYS_REC_BTN_H,
+                   recActive ? "Stop REC" : "Start REC");
+
+    char recBuf[40];
+    if (recActive) {
+      snprintf(recBuf, sizeof(recBuf), "REC  %u q  %u parked",
+               static_cast<unsigned>(pending), static_cast<unsigned>(problems));
+    } else {
+      snprintf(recBuf, sizeof(recBuf), "SD log  %u q  %u parked",
+               static_cast<unsigned>(pending), static_cast<unsigned>(problems));
+    }
+    s_tft.setTextFont(1);
+    s_tft.setTextDatum(ML_DATUM);
+    s_tft.setTextPadding(150);
+    s_tft.setTextColor(recActive ? COL_BLUE : COL_MUTED, COL_CARD, true);
+    s_tft.drawString(recBuf, 162, SYS_REC_BTN_Y + (SYS_REC_BTN_H / 2));
+    s_tft.setTextPadding(0);
+  }
 }
 
 }  // namespace
@@ -955,8 +997,11 @@ void uiShowToast(const char* msg, uint32_t durationMs) {
 }
 
 void uiPollTouch() {
+  // The SD logger shares VSPI with the touch controller; take the bus briefly.
+  if (!sdlogBusLock()) return;
   bool isDown = s_touch.touched();
   if (!isDown) {
+    sdlogBusUnlock();
     s_touchWasDown = false;
     return;
   }
@@ -964,12 +1009,14 @@ void uiPollTouch() {
   // Trigger once per press with debounce cooldown
   uint32_t now = millis();
   if (s_touchWasDown || (now - s_lastTouchActionMs) < TOUCH_DEBOUNCE_MS) {
+    sdlogBusUnlock();
     return;
   }
   s_touchWasDown = true;
   s_lastTouchActionMs = now;
 
   TS_Point p = s_touch.getPoint();
+  sdlogBusUnlock();
   int mappedX = map(p.x, TOUCH_RAW_MIN_X, TOUCH_RAW_MAX_X, 0, SCREEN_W);
   mappedX = constrain(mappedX, 0, SCREEN_W - 1);
   int mappedY = map(p.y, TOUCH_RAW_MIN_Y, TOUCH_RAW_MAX_Y, 0, SCREEN_H);
@@ -1007,6 +1054,31 @@ void uiPollTouch() {
     } else {
       portalStart();
       Serial.println("[UI] Wi-Fi Setup tapped -> starting SoftAP");
+    }
+    s_needFullPageRedraw.store(true);
+    s_lastUiUpdateMs = 0;
+    netRequestStatusPublish();
+    return;
+  }
+
+  // System tab [ Start REC ] / [ Stop REC ] touch button (x=14..154, y=180..204)
+  if (curPage == PAGE_SYS && mappedX >= SYS_REC_BTN_X &&
+      mappedX <= (SYS_REC_BTN_X + SYS_REC_BTN_W) &&
+      mappedY >= SYS_REC_BTN_Y && mappedY <= (SYS_REC_BTN_Y + SYS_REC_BTN_H)) {
+    if (sdlogIsActive()) {
+      // The recorder itself logs a WARN when it stayed active or dropped rows.
+      if (sdlogStop()) {
+        uiShowToast("SD recording stopped", 2500);
+        netLogEvent("INFO", "sd", "Ride recording stopped");
+      } else {
+        uiShowToast("SD stop warning: check card & logs", 3500);
+      }
+    } else if (sdlogStart()) {
+      uiShowToast("SD recording started", 2500);
+      netLogEvent("INFO", "sd", "Ride recording started");
+    } else {
+      uiShowToast("SD start failed: insert card / set clock", 3500);
+      netLogEvent("WARN", "sd", "Ride recording start failed");
     }
     s_needFullPageRedraw.store(true);
     s_lastUiUpdateMs = 0;
