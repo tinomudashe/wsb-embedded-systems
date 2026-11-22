@@ -55,9 +55,9 @@ def normalize_telemetry(
 ) -> tuple[dict, list[str]]:
     """Validate a nested telemetry message and flatten it into a telemetry row.
 
-    ``allow_agps_fallback`` and ``derive_aqi`` keep the live-ingest behaviour
-    unchanged while letting ride uploads store only what the CSV actually
-    contains (no synthetic GPS fix / AQI for historical rows).
+    ``allow_agps_fallback`` and ``derive_aqi`` keep live ingest behaviour
+    unchanged. Ride uploads pass False for both, so historical rows store only
+    the CSV values (no synthetic GPS fix or AQI).
     """
     if not isinstance(msg, dict):
         raise ValidationError("payload must be a JSON object")
@@ -99,7 +99,7 @@ def normalize_telemetry(
     aqi = _num(env.get("aqi"), 0, 500, "env.aqi", w)
     aqi_source = _str(env.get("aqi_source"), 20)
 
-    # Optional particulate-matter fields (SPS30 or similar). Carried through when present.
+    # Optional particulate-matter fields (SPS30 or similar). Passed through when present.
     pm1 = _num(env.get("pm1"), 0, 1000, "env.pm1", w)
     pm2_5 = _num(env.get("pm2_5"), 0, 1000, "env.pm2_5", w)
     pm4 = _num(env.get("pm4"), 0, 1000, "env.pm4", w)

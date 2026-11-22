@@ -2,9 +2,9 @@
 #   cp .env.example .env   # then edit JWT_SECRET / MQTT_PASS
 #   make dev-up            # docker compose up --build -d
 #
-# The build uses the repository root as context so the multi-stage Dockerfile
-# can compile web/ and copy the result into the API image (no stale committed
-# static assets are used). Host ports bind to loopback by default; see
+# The build uses the repository root as context. The multi-stage Dockerfile
+# compiles web/ and copies the result into the API image, so it does not use the
+# committed server/static. Host ports bind to loopback by default; see
 # docker-compose.lan.yml and the README for firmware LAN testing.
 services:
   api:

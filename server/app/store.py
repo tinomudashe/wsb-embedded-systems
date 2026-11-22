@@ -586,10 +586,10 @@ def rejected(device_id: str, limit: int) -> list[dict]:
 
 
 def purge_old(days: int) -> int:
-    """Purge expired telemetry and any ride metadata whose data has aged out.
+    """Delete expired telemetry and ride metadata whose data has expired.
 
-    Ride rows are deleted together with their telemetry so a listed ride never
-    has an empty track or an idempotent re-upload that returns no rows.
+    Deleting a ride together with its telemetry keeps a listed ride from having
+    an empty track or an idempotent re-upload that returns no rows.
     """
     cutoff = iso_ago(days * 86400)
     with db.transaction() as conn:

@@ -774,9 +774,9 @@ void netTaskFn(void* param) {
       flushDeviceLogs();
       flushTelemetry(cred);
 
-      // Upload one finished ride CSV at most once a minute. This runs on the net
-      // task, so the UI loop keeps rendering; live samples stay in the ring
-      // buffer while the HTTP request is in flight.
+      // Upload one finished ride CSV at most once a minute. This runs on the
+      // net task, so the UI loop keeps rendering. Live samples stay in the ring
+      // buffer during the HTTP request.
       uint32_t now = millis();
       if (wifiOk && (s_lastRideUploadMs == 0 ||
                      (now - s_lastRideUploadMs) >= SDLOG_UPLOAD_INTERVAL_MS)) {

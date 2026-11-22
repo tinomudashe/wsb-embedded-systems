@@ -1,38 +1,36 @@
 # wsb-embedded-systems
 
-IoT air-quality + GPS telemetry: an ESP32 CYD firmware (`firmware/`), a FastAPI +
-SQLite backend with an MQTT bridge (`server/`), and a React dashboard (`web/`).
+ESP32 CYD firmware (`firmware/`), FastAPI + SQLite backend with an MQTT bridge
+(`server/`), and a React dashboard (`web/`).
 
 ## Local development
 
-Prerequisites: Python 3.12+ (3.14 works), Node 22+, and — for the container
-stack — Docker. `pio` is only needed to compile firmware. `make test` refuses
-older Python interpreters with a clear error.
+Requires Python 3.12+ (3.14 works), Node 22+, Docker for the container stack,
+and `pio` for firmware builds. `make test` rejects older Python versions.
 
 ```bash
-cp .env.example .env      # set JWT_SECRET and MQTT_PASS (and MQTT_USER if desired)
-make venv                 # creates server/.venv, installs runtime + dev deps
+cp .env.example .env      # set JWT_SECRET and MQTT_PASS
+make venv                 # creates server/.venv and installs runtime + dev deps
 ```
 
-`.env` is **compose-only**: Docker Compose reads it automatically; `uvicorn` and
-the other tools do not. For a manual API run, export it in the shell from the
-repository root so the relative `DB_PATH`/`STATIC_DIR` values resolve correctly:
+Docker Compose reads `.env`. The other tools do not. For a manual API run,
+export it from the repository root:
 
 ```bash
 set -a; source .env; set +a
 server/.venv/bin/uvicorn app.main:app --app-dir server --reload --port 8000
 ```
 
-Build the dashboard into `server/static` (the API serves it at `/`):
+Build the dashboard into `server/static`; the API serves it at `/`:
 
 ```bash
 make build-web            # cd web && npm ci && npm run build
-cd web && npm run dev     # or use the Vite dev server during UI work
+cd web && npm run dev     # Vite dev server
 ```
 
-Firmware (PlatformIO; `include/secrets.h` is git-ignored). `make build-firmware`
-copies `secrets.example.h` automatically if `secrets.h` is missing — edit the
-copied credentials before flashing:
+Firmware builds need `include/secrets.h`, which git ignores. `make
+build-firmware` copies `secrets.example.h` when `secrets.h` is missing. Edit the
+copy before flashing:
 
 ```bash
 make build-firmware       # cd firmware && pio run -e cyd
@@ -40,47 +38,42 @@ make build-firmware       # cd firmware && pio run -e cyd
 
 ### Container stack
 
-The Docker build is multi-stage: a `node:22-slim` stage runs `npm ci` and
-`npm run build`, then the built dashboard is copied into the Python runtime
-image at `/app/static`. No stale committed `server/static` is used.
+The image builds in two stages. A `node:22-slim` stage runs `npm ci` and `npm
+run build`; the Python runtime copies the result to `/app/static`.
 
 ```bash
-cp .env.example .env      # make dev-up fails with a clear message if this is missing
+cp .env.example .env      # make dev-up fails with a message when this is missing
 make dev-up               # docker compose up --build -d
 curl localhost:8000/api/health
 make dev-down
 ```
 
-Host ports bind to **loopback only** by default (`127.0.0.1:8000` and
-`127.0.0.1:1883`). The bundled local broker
-(`server/deploy/mosquitto-local.conf`) allows anonymous access, which is safe
-only because it is not exposed beyond the machine.
+Host ports bind to `127.0.0.1` by default. The local broker
+(`server/deploy/mosquitto-local.conf`) allows anonymous access; the loopback
+binding keeps it off the network.
 
-For real firmware testing on the LAN, use the explicit authenticated override —
-never the anonymous broker:
+For firmware testing on the LAN, use the authenticated override:
 
 ```bash
-# One-time password file outside the repo (use the same values as .env).
+# One-time password file outside the repo (same values as .env).
 mkdir -p /tmp/wsb-mosquitto
 mosquitto_passwd -c -b /tmp/wsb-mosquitto/passwd backend "$MQTT_PASS"
 mosquitto_passwd -b /tmp/wsb-mosquitto/passwd cyd-01 "$DEVICE_KEY"
-chmod 644 /tmp/wsb-mosquitto/passwd   # local-only file; broker runs as uid 1883
+chmod 644 /tmp/wsb-mosquitto/passwd   # broker runs as uid 1883
 
 API_BIND=0.0.0.0 MQTT_BIND=0.0.0.0 \
   docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
 ```
 
 `docker-compose.lan.yml` switches Mosquitto to
-`server/deploy/mosquitto-local-auth.conf` plus `server/deploy/mosquitto.acl`
-and the generated password file. Set `MQTT_USER`/`MQTT_PASS` in `.env` to match
-the password file; the production password/ACL model remains in
-`server/deploy/mosquitto-wsb.conf`.
+`server/deploy/mosquitto-local-auth.conf`, `server/deploy/mosquitto.acl` and the
+generated password file. Set `MQTT_USER` and `MQTT_PASS` in `.env` to match.
+Production keeps its config in `server/deploy/mosquitto-wsb.conf`.
 
 ## Ride recorder
 
-The dashboard includes a **Rides & Recorded Tracks** panel (track preview,
-distance/duration and PM/environment statistics) and these endpoints are
-available:
+The dashboard includes a Rides & Recorded Tracks panel with track preview,
+distance and duration, and PM/environment statistics. Endpoints:
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -90,24 +83,22 @@ available:
 | `GET` | `/api/rides/{ride_id}/export.csv` | Full ride sample export |
 | `DELETE` | `/api/rides/{ride_id}` | Delete a ride and its telemetry samples |
 
-On the ESP32, insert a microSD card and use **Start REC / Stop REC** on the
-System tab. Samples are buffered and appended to `/ride_YYYYMMDD_HHMMSS.csv`;
-completed files upload at most once per minute while Wi-Fi is available, and
-after the server confirms every row the copy is removed from the card (the
-server is the durable copy; a copy that cannot be removed is renamed `.csv.done`
-and pruned later). Files the server rejects permanently are parked as
-`.csv.bad`; empty, oversized, header-only or over-20,000-row files are parked as
-`.csv.big`. HTTP 401/403/408/429 are retried, so re-provisioning a device
-recovers its queued rides.
-Recording requires a valid UTC clock (NTP or GPS UTC); PM columns stay empty
-until a particulate-matter sensor driver is added.
+On the ESP32, insert a microSD card and use Start REC / Stop REC on the System
+tab. The firmware writes samples to `/ride_YYYYMMDD_HHMMSS.csv` and uploads
+completed files at most once per minute while Wi-Fi is available. After the
+server confirms every row, the firmware removes the card copy. If removal fails,
+it renames the file `.csv.done` and prunes it later. The firmware parks
+permanent rejections as `.csv.bad`, and empty, oversized, header-only or
+over-20,000-row files as `.csv.big`. It retries HTTP 401/403/408/429, so
+re-provisioning a device recovers queued rides. The recorder needs a valid UTC
+clock (NTP or GPS UTC). The firmware leaves PM columns empty until a
+particulate-matter driver exists.
 
 ## Tests
 
-Backend tests run offline against a throw-away SQLite database; the MQTT bridge
-is stubbed so no broker is required. The suite includes legacy-schema migration
-coverage and smoke tests for track/series/rejected/command/simulate/profile/QR
-endpoints.
+Backend tests run offline against a temporary SQLite database. `conftest.py`
+stubs the MQTT bridge. Tests cover legacy-schema migration and smoke tests for
+track, series, rejected, command, simulate, profile and QR endpoints.
 
 ```bash
 make test                 # pytest
@@ -115,16 +106,15 @@ make test-cov             # pytest --cov=app --cov-report=term-missing
 ```
 
 `server/tests/conftest.py` sets `JWT_SECRET`, `MQTT_PASS`, `DB_PATH`,
-`STATIC_DIR` and `MOSQUITTO_PASSWD_FILE` before importing the app, and rebuilds
-a fresh database per test. Tests that document known, unfixed behavior are
-marked `xfail` with a reason; the A-GPS expectation uses `strict=False` so a
-future fix reports XPASS rather than failing the suite.
+`STATIC_DIR` and `MOSQUITTO_PASSWD_FILE` before importing the app, and creates a
+fresh database for each test. Tests for known bugs use `xfail` with a reason.
+The A-GPS test uses `strict=False`, so a fix reports XPASS.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes to any branch, pull requests targeting
-`main`, and manual dispatch (`workflow_dispatch`). Jobs have timeouts
-(server/web 20 min, firmware 30 min):
+`.github/workflows/ci.yml` runs on pushes to any branch, pull requests to `main`,
+and `workflow_dispatch`. Timeouts: 20 minutes for server and web, 30 for
+firmware.
 
 | Job        | What it does                                                        |
 |------------|---------------------------------------------------------------------|
@@ -132,25 +122,23 @@ future fix reports XPASS rather than failing the suite.
 | `web`      | Node 22, `npm ci`, `npm run build`                                  |
 | `firmware` | PlatformIO compile of `env:cyd` using `secrets.example.h`           |
 
-Pip and npm caches use `actions/cache`; no repository secrets are needed.
+Pip and npm caches use `actions/cache`. The workflow needs no repository
+secrets.
 
 ## Backup
 
-`server/deploy/backup.sh` makes a consistent online copy with `sqlite3 .backup`
-and prunes files older than `BACKUP_RETENTION_DAYS` (default 7; `0` disables
-pruning). A legacy `RETENTION_DAYS` is accepted as a fallback, but it is the
-server's telemetry retention setting, not a backup setting, so set
-`BACKUP_RETENTION_DAYS` explicitly (for example from a wrapper that makes it
-available to the cron job).
+`server/deploy/backup.sh` copies the database with `sqlite3 .backup` and prunes
+files older than `BACKUP_RETENTION_DAYS` (default 7; `0` disables pruning). The
+script also accepts a legacy `RETENTION_DAYS`, but the app reads that variable as
+telemetry retention, so set `BACKUP_RETENTION_DAYS` explicitly.
 
 ```bash
 DB_PATH=/var/lib/wsb/telemetry.db BACKUP_DIR=/var/backups/wsb \
   server/deploy/backup.sh
 ```
 
-It exits cleanly when the database does not exist yet. Copies are written to a
-`.partial` file, checked with `PRAGMA quick_check`, and only then renamed to
+The script exits when the database is missing. It writes a `.partial` file,
+checks it with `PRAGMA quick_check`, then renames it to
 `wsb-telemetry-<timestamp>.db`; an EXIT trap removes incomplete files. Backups
-use `umask 077`, a `700` directory and `600` files, so they are private to the
-account running the script. Schedule it with cron/systemd if you want automatic
-backups.
+use `umask 077`, a `700` directory and `600` files. Schedule it with cron or
+systemd.

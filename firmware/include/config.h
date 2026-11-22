@@ -51,8 +51,8 @@
 #define PIN_GPS_RX 35
 #define PIN_GPS_TX -1
 
-// microSD / TF slot (SPI). Note: the TF slot and XPT2046 touch share the VSPI
-// peripheral, so sdlog.cpp switches the bus pins around SD operations.
+// microSD / TF slot (SPI). The TF slot and XPT2046 touch share VSPI, so
+// sdlog.cpp switches the bus pins around SD operations.
 #define PIN_SD_CS 5
 #define PIN_SD_MOSI 23
 #define PIN_SD_MISO 19

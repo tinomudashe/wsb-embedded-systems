@@ -183,7 +183,7 @@ def test_upload_and_ride_read_model(client):
     assert telemetry[0]["tvoc_ppb"] == 120.0
     assert telemetry[2]["gps_fix"] == 0 and telemetry[2]["lat"] is None
 
-    # Ride rows never feed the live series/stats streams.
+    # Ride rows stay out of the live series and stats streams.
     assert store.series(device_id, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", 3600) == []
     assert store.latest_telemetry(device_id) is None
     assert store.track(device_id, "2026-01-01T00:00:00Z", 100) == []

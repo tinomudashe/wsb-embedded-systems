@@ -1,13 +1,11 @@
-"""Shared pytest fixtures for the WSB FastAPI backend.
+"""Shared pytest fixtures for the FastAPI backend.
 
-`app.config` deliberately calls ``sys.exit(1)`` when JWT_SECRET or MQTT_PASS is
-missing, so the environment in this module is configured *before* any `app.*`
-module is imported. pytest imports conftest.py before test modules, which makes
-this the correct place for it.
+`app.config` calls ``sys.exit(1)`` when JWT_SECRET or MQTT_PASS is missing, so
+this module sets the environment before importing any `app.*` module. pytest
+imports conftest.py before test modules.
 
-Tests never talk to a real broker: `app.mqtt_bridge.start/stop` and the publish
-helpers are monkeypatched by the `client` fixture and all data goes to a
-throw-away SQLite file in the system temp directory.
+Tests use no broker. The `client` fixture stubs `app.mqtt_bridge.start/stop` and
+the publish helpers. Data goes to a temporary SQLite file.
 """
 from __future__ import annotations
 
@@ -103,7 +101,7 @@ def client(database, monkeypatch):
     from app import main, mqtt_bridge
     from app.live import hub
 
-    # Never open a TCP connection to Mosquitto / never publish.
+    # Stub the broker: no TCP connection, no publish.
     monkeypatch.setattr(mqtt_bridge, "start", lambda: None)
     monkeypatch.setattr(mqtt_bridge, "stop", lambda: None)
     monkeypatch.setattr(mqtt_bridge, "publish_config", lambda device_id: False)

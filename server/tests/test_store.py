@@ -81,7 +81,7 @@ def test_telemetry_insert_and_dedupe(database):  # noqa: ARG001
 
 @pytest.mark.xfail(
     reason="SQLite UNIQUE(device_id, ts, seq) treats NULL seq values as distinct, "
-           "so telemetry without a seq is never deduplicated (known limitation)",
+           "so telemetry without a seq is not deduplicated (known limitation)",
     strict=True,
 )
 def test_telemetry_without_seq_is_deduped(database):  # noqa: ARG001

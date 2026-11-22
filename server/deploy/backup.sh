@@ -47,7 +47,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Online, consistent copy (does not block writers and flushes the WAL).
-# The incomplete copy never carries the final .db name.
+# The incomplete copy uses a .partial name.
 sqlite3 "$DB_PATH" ".backup '$PARTIAL'"
 
 CHECK="$(sqlite3 "$PARTIAL" 'PRAGMA quick_check;')"

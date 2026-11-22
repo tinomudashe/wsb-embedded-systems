@@ -43,7 +43,7 @@ function hasPM(stats) {
   );
 }
 
-/** Lightweight SVG preview of a recorded GPS track (no map tiles / extra deps). */
+/** SVG preview of a recorded GPS track (no map tiles or extra dependencies). */
 function TrackPreview({ track }) {
   const points = useMemo(() => {
     const valid = (track || []).filter((p) => p && p.lat !== null && p.lon !== null);

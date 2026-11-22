@@ -1,7 +1,7 @@
 # LAN-only override for testing real firmware against the local stack.
 #
-# This does NOT enable anonymous access: it switches Mosquitto to the
-# password/ACL configuration. Generate the password file first (see README):
+# This switches Mosquitto to password/ACL authentication. Generate the
+# password file first (see README):
 #
 #   mkdir -p /tmp/wsb-mosquitto
 #   mosquitto_passwd -c -b /tmp/wsb-mosquitto/passwd backend "$MQTT_PASS"
@@ -12,7 +12,7 @@
 #   API_BIND=0.0.0.0 MQTT_BIND=0.0.0.0 \
 #     docker compose -f docker-compose.yml -f docker-compose.lan.yml up --build
 #
-# Never combine this override with mosquitto-local.conf (anonymous access).
+# Do not combine this override with mosquitto-local.conf (anonymous access).
 services:
   mosquitto:
     environment:

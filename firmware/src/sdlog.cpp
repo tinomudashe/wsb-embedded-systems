@@ -29,8 +29,8 @@ constexpr size_t BUFFER_MAX = SDLOG_FLUSH_SAMPLES * SDLOG_LINE_MAX;
 SemaphoreHandle_t s_mutex = nullptr;
 std::atomic<bool> s_active{false};
 std::atomic<bool> s_uploading{false};
-// Set while the bus is routed to the SD pins but the state mutex is released
-// (during the streaming HTTP upload). Touch code must not touch SPI then.
+// Set while the bus is routed to the SD pins and the state mutex is released
+// (during the streaming HTTP upload). Touch code must not use SPI then.
 std::atomic<bool> s_busBusy{false};
 std::atomic<size_t> s_pending{0};
 std::atomic<size_t> s_problems{0};
@@ -69,8 +69,8 @@ bool isProblemFile(const char* name) {
   return endsWith(base, ".csv.big") || endsWith(base, ".csv.bad");
 }
 
-// Uploaded rides are removed after a verified upload. A file that could not be
-// removed is renamed to this suffix and pruned on a later mount/upload pass.
+// The logger removes a ride after the server verifies the upload. If removal
+// fails, it renames the file to this suffix and prunes it later.
 bool isDoneFile(const char* name) {
   const char* base = baseName(name);
   return endsWith(base, ".csv.done");
@@ -84,9 +84,9 @@ void giveMutex() {
   if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
-// The TF slot and the XPT2046 touch panel share the VSPI peripheral. While a
-// recording is active the card stays mounted; the pins are switched to the SD
-// side only for actual file I/O and restored to the touch side afterwards.
+// The TF slot and the XPT2046 touch panel share VSPI. The card stays mounted
+// during a recording. The logger switches the pins to SD for file I/O and back
+// to touch afterwards.
 void busToSdLocked() {
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 }
@@ -270,9 +270,9 @@ bool renameFileLocked(const char* path, const char* suffix) {
   return SD.rename(path, renamed);
 }
 
-// Removes already-uploaded *.csv.done files. The server already accepted them
-// (rows verified), so the card copy is redundant. Stops after maxRemove files
-// to bound the time spent holding the shared SPI bus. Returns the number removed.
+// Removes uploaded *.csv.done files. The server accepted these rows, so the
+// card copy is redundant. Stops after maxRemove files to bound the time on the
+// shared SPI bus. Returns the number of files removed.
 size_t removeDoneFilesLocked(size_t maxRemove) {
   if (maxRemove == 0) return 0;
   size_t removed = 0;
@@ -297,7 +297,7 @@ size_t removeDoneFilesLocked(size_t maxRemove) {
     }
     if (!again) break;
     if (!SD.remove(name)) {
-      // Leave it for a later pass rather than spinning on it.
+      // Leave it for a later pass.
       Serial.printf("[SD] could not remove uploaded %s\n", name);
       break;
     }
@@ -569,9 +569,9 @@ bool sdlogUploadPending() {
     netLogEvent("WARN", "sd", "Could not read ride CSV from card; will retry");
     return false;
   }
-  // The server answers 413 above SDLOG_MAX_UPLOAD_ROWS rows and the firmware
-  // treats every 413 as permanent, so stop such rides here (as .csv.big) rather
-  // than letting the upload strand them in .csv.bad.
+  // The server returns 413 above SDLOG_MAX_UPLOAD_ROWS rows. The firmware
+  // treats 413 as permanent, so park such rides here as .csv.big. Otherwise the
+  // upload strands them in .csv.bad.
   const char* reason = nullptr;
   if (size == 0 || size > SDLOG_MAX_UPLOAD_BYTES) {
     reason = "empty or larger than the upload byte limit";
@@ -611,9 +611,9 @@ bool sdlogUploadPending() {
   http.addHeader("X-Device-Key", cred.device_key);
   http.addHeader("X-Filename", filename);
 
-  // Stream from the file without buffering it in RAM. Release the state mutex
-  // during the network transfer (touch sees s_busBusy and skips SPI), then take
-  // it back for the rename/scan.
+  // Stream from the file instead of buffering it in RAM. Release the state
+  // mutex during the transfer (touch sees s_busBusy and skips SPI), then take it
+  // back for the rename and scan.
   busToSdLocked();
   s_busBusy.store(true);
   giveMutex();
@@ -648,8 +648,8 @@ bool sdlogUploadPending() {
       netLogEvent("WARN", "sd", "Ride upload response did not match CSV; will retry");
     }
   } else {
-    // 401/403 are retryable: credentials are re-read from settings on every
-    // attempt, so re-provisioning the device recovers the queued ride.
+    // Treat 401/403 as retryable. The firmware re-reads credentials from
+    // settings on each attempt, so re-provisioning the device recovers the ride.
     terminal = code >= 400 && code < 500 && code != 401 && code != 403 &&
                code != 408 && code != 429;
     Serial.printf("[SD] ride upload %s failed -> %d (%s)\n", filename, code,
@@ -657,9 +657,9 @@ bool sdlogUploadPending() {
   }
 
   if (uploadOk) {
-    // Drop the file after the verified upload: the server is the durable copy and
-    // keeping it would eventually fill the card. If removal fails, rename it to
-    // .done so the next scan/prune pass removes it instead of re-uploading it.
+    // Remove the file after the server verifies the upload. The server holds the
+    // durable copy; a second copy fills the card. If removal fails, rename it to
+    // .done so the next scan or prune pass removes it.
     if (!SD.remove(path)) {
       if (renameFileLocked(path, ".done")) {
         Serial.printf("[SD] uploaded %s but could not remove it; queued .done for pruning\n", path);

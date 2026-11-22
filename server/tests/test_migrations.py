@@ -2,8 +2,8 @@
 
 `LEGACY_SCHEMA` is the `server/app/db.py` SCHEMA from base commit 29baa54.
 `db.init()` must preserve existing rows and be idempotent. When the
-ride-recorder schema is merged, the second test additionally verifies that the
-rides table, telemetry columns and indexes are added to a legacy database.
+ride-recorder schema is present, the second test verifies that `db.init()` adds
+the rides table, telemetry columns and indexes to a legacy database.
 """
 from __future__ import annotations
 

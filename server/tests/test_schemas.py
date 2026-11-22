@@ -144,8 +144,8 @@ def test_future_timestamp_is_replaced_and_warned():
 
 
 def test_malformed_timestamp_silently_falls_back():
-    # Current behavior: strings that do not match the strict ISO regex are not
-    # warned about, they are simply ignored in favor of the receive time.
+    # Current behavior: strings that fail the strict ISO regex get no warning;
+    # the parser uses the receive time.
     msg = _payload(ts="01/05/2026 10:00")
 
     rec, warnings = normalize_telemetry(msg, DEVICE, "mqtt")
@@ -177,7 +177,7 @@ def test_missing_fix_is_not_synthesized():
 
 
 def test_missing_fix_current_default_is_agps():
-    """Document the current A-GPS default once; this is a known bug, not a spec.
+    """Document the current A-GPS default once; this is a known bug.
 
     A record without a GPS fix is rewritten to gps_fix=1 at 54.3757/18.5987, so
     consumers cannot tell a real fix from a synthetic one. The rides branch owns

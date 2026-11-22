@@ -10,10 +10,9 @@ bool sdlogInit();
 // Starts a new ride_YYYYMMDD_HHMMSS.csv file. Requires a valid UTC clock.
 bool sdlogStart();
 
-// Flushes buffered rows and closes the current ride file. Returns true only if
-// recording actually stopped (the SD bus lock succeeded) and the final flush
-// succeeded with no dropped rows; false leaves the recorder running or the ride
-// incomplete, so callers should warn.
+// Flushes buffered rows and closes the ride file. Returns true when recording
+// stopped and the final flush succeeded with no dropped rows. Returns false when
+// the recorder still runs or the ride is incomplete; callers should warn.
 bool sdlogStop();
 
 bool sdlogIsActive();
@@ -31,11 +30,10 @@ size_t sdlogProblemCount();
 // Re-scans the card for pending/parked rides (boot, or periodically from net).
 void sdlogRefreshPending();
 
-// Attempts to POST one pending CSV to /api/devices/{id}/rides. On success the
-// card copy is removed (the server is the durable copy); files the server
-// rejects for a non-recoverable reason (4xx other than 401/403/408/429) become
-// *.csv.bad, and rides above the byte/row limits become *.csv.big. Returns true
-// when a ride was uploaded.
+// POSTs one pending CSV to /api/devices/{id}/rides. On success the firmware
+// removes the card copy (the server holds the durable copy). Permanent 4xx
+// responses, except 401/403/408/429, become *.csv.bad; rides above the byte or
+// row limits become *.csv.big. Returns true when a ride was uploaded.
 bool sdlogUploadPending();
 
 // The TF slot and touch panel share VSPI. UI code brackets raw touch reads with
